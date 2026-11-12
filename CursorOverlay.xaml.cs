@@ -49,7 +49,8 @@ namespace Tagsor
             base.OnSourceInitialized(e);
             _hwnd = new WindowInteropHelper(this).Handle;
             int extendedStyle = GetWindowLong(_hwnd, GWL_EXSTYLE);
-            SetWindowLong(_hwnd, GWL_EXSTYLE, extendedStyle | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+            // Removed WS_EX_TOOLWINDOW so screen recorders (OBS, Game Bar, Discord, Zoom) capture the overlay
+            SetWindowLong(_hwnd, GWL_EXSTYLE, extendedStyle | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE);
             EnforceTopmost();
         }
 
