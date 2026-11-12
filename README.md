@@ -39,14 +39,16 @@ When you're sharing your screen on a call, recording a tutorial, or plugging two
 2. Double-click **`Tagsor.exe`**.
 3. A small **Tagsor** icon will appear in your Windows system tray (bottom-right near the clock), and your cursor tag will appear right away.
 
-> **Note:** Because `Tagsor.exe` is an unsigned indie utility, Windows SmartScreen may show a prompt on the first launch. Click **More info** → **Run anyway**.
+> **Notes:**
+> - Because `Tagsor.exe` is an unsigned indie utility, Windows SmartScreen may show a prompt on the first launch. Click **More info** → **Run anyway**.
+> - When recording your screen, use **Full-Screen / Display Capture** (e.g., OBS Display Capture or Windows Snipping Tool) rather than single-window capture so the floating overlay is included in your video.
 
 ### Option 2: Build from Source
 Make sure you have the [.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) installed on Windows 10 or 11.
 
 ```bash
-git clone https://github.com/zakiuhh/tagsor.git
-cd Tagsor
+git clone [https://github.com/zakiuhh/tagsor.git](https://github.com/zakiuhh/tagsor.git)
+cd tagsor
 dotnet run
 ```
 
