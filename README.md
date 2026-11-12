@@ -94,4 +94,4 @@ Your saved mouse names and accent colors are stored locally on your machine in J
 
 ## License
 
-MIT License — feel free to use, modify, and share.
+Distributed under the [MIT License](LICENSE) — feel free to use, modify, and share.
