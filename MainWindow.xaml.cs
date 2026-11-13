@@ -7,14 +7,18 @@ using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
 using System.Windows.Automation;
+using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
+using System.Windows.Shapes;
 using System.Windows.Threading;
 using Linearstar.Windows.RawInput;
 using Linearstar.Windows.RawInput.Native;
 using Microsoft.Win32;
 using Forms = System.Windows.Forms;
+using IOPath = System.IO.Path;
 
 namespace Tagsor
 {
@@ -22,10 +26,25 @@ namespace Tagsor
     {
         private const int WM_INPUT = 0x00FF;
         private const int WM_HOTKEY = 0x0312;
+
+        // Global Hotkey IDs
         private const int HOTKEY_PRIVACY_ID = 9001;
+        private const int HOTKEY_SPOTLIGHT_ID = 9002;
+        private const int HOTKEY_STATUS_1_ID = 9003;
+        private const int HOTKEY_STATUS_2_ID = 9004;
+        private const int HOTKEY_STATUS_3_ID = 9005;
+
         private const uint MOD_ALT = 0x0001;
         private const uint MOD_CONTROL = 0x0002;
         private const uint VK_H = 0x48;
+        private const uint VK_S = 0x53;
+        private const uint VK_1 = 0x31;
+        private const uint VK_2 = 0x32;
+        private const uint VK_3 = 0x33;
+
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TRANSPARENT = 0x00000020;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
 
         private const string AppName = "Tagsor";
         private const uint MAPVK_VK_TO_CHAR = 2;
@@ -52,12 +71,33 @@ namespace Tagsor
         private Forms.NotifyIcon _trayIcon = null!;
         private TrayMenuPopup? _activeTrayMenu;
 
+        // Keystrokes & Repeat Counter State
         private readonly List<KeyDisplayItem> _typedKeys = new();
         private DateTime _lastKeyTime = DateTime.MinValue;
         private bool _isShowingKeys = false;
 
-        private const double BaseOffsetX = 4;
-        private const double BaseOffsetY = 12;
+        // Feature 1: Drag-Hold & Double-Click State
+        private string? _heldMouseButton = null;
+        private DateTime _mouseDownTime = DateTime.MinValue;
+        private bool _holdBadgeShown = false;
+        private DateTime _lastLeftClickTime = DateTime.MinValue;
+
+        // Feature 2: Spotlight Dimmer Overlay State
+        private Window? _spotlightWindow;
+        private RadialGradientBrush? _spotlightBrush;
+        private bool _isSpotlightActive = false;
+
+        // Feature 3: Quick-Switch Status Chip State
+        private string? _activeStatusText = null;
+        private DateTime _statusExpiryTime = DateTime.MinValue;
+
+        // Feature 5: Shake-to-Locate Velocity Tracking
+        private int _lastMoveDirection = 0;
+        private int _directionFlipCount = 0;
+        private DateTime _shakeWindowStart = DateTime.MinValue;
+
+        private const double BaseOffsetX = -6;
+        private const double BaseOffsetY = 6;
 
         [DllImport("user32.dll")]
         private static extern bool GetCursorPos(out POINT lpPoint);
@@ -70,6 +110,12 @@ namespace Tagsor
 
         [DllImport("user32.dll")]
         private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        [DllImport("user32.dll")]
+        private static extern int GetWindowLong(IntPtr hwnd, int index);
+
+        [DllImport("user32.dll")]
+        private static extern int SetWindowLong(IntPtr hwnd, int index, int newStyle);
 
         [StructLayout(LayoutKind.Sequential)]
         public struct POINT { public int X; public int Y; }
@@ -84,9 +130,9 @@ namespace Tagsor
             this.ShowInTaskbar = false;
             this.Visibility = Visibility.Hidden;
 
-            string appDataFolder = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DualCursorApp");
+            string appDataFolder = IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DualCursorApp");
             Directory.CreateDirectory(appDataFolder);
-            _saveFilePath = Path.Combine(appDataFolder, "saved_mice.json");
+            _saveFilePath = IOPath.Combine(appDataFolder, "saved_mice.json");
 
             LoadSavedMice();
             RegisterWindowsStartup();
@@ -113,6 +159,11 @@ namespace Tagsor
                 SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
                 var hwnd = new WindowInteropHelper(_overlay).Handle;
                 UnregisterHotKey(hwnd, HOTKEY_PRIVACY_ID);
+                UnregisterHotKey(hwnd, HOTKEY_SPOTLIGHT_ID);
+                UnregisterHotKey(hwnd, HOTKEY_STATUS_1_ID);
+                UnregisterHotKey(hwnd, HOTKEY_STATUS_2_ID);
+                UnregisterHotKey(hwnd, HOTKEY_STATUS_3_ID);
+                _spotlightWindow?.Close();
                 _trayIcon.Visible = false;
                 _trayIcon.Dispose();
                 _overlay.Close();
@@ -191,6 +242,7 @@ namespace Tagsor
                     SaveMiceToDisk();
                 }
 
+                _activeStatusText = null;
                 _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
             }
         }
@@ -200,6 +252,7 @@ namespace Tagsor
             _savedMice.Clear();
             SaveMiceToDisk();
             _activeDeviceId = "";
+            _activeStatusText = null;
             _activeProfile = new MouseProfile { Name = "Zaki", AccentHex = "#60A5FA" };
             _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
         }
@@ -212,7 +265,7 @@ namespace Tagsor
             {
                 _isShowingKeys = false;
                 _typedKeys.Clear();
-                _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
+                RestoreNameOrStatus();
             }
         }
 
@@ -222,9 +275,105 @@ namespace Tagsor
             _trayIcon.Text = _isOverlayPaused ? "Tagsor (Paused)" : "Tagsor";
 
             if (_isOverlayPaused)
+            {
                 _overlay.Hide();
+                if (_isSpotlightActive) ToggleSpotlight();
+            }
             else
+            {
                 _overlay.Show();
+            }
+        }
+
+        // Feature 2: Spotlight Dimmer Toggle (Ctrl + Alt + S)
+        private void ToggleSpotlight()
+        {
+            _isSpotlightActive = !_isSpotlightActive;
+
+            if (_isSpotlightActive)
+            {
+                if (_spotlightWindow == null)
+                {
+                    _spotlightBrush = new RadialGradientBrush
+                    {
+                        MappingMode = BrushMappingMode.Absolute,
+                        RadiusX = 150,
+                        RadiusY = 150
+                    };
+                    _spotlightBrush.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromArgb(0, 0, 0, 0), 0.0));
+                    _spotlightBrush.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromArgb(0, 0, 0, 0), 0.72));
+                    _spotlightBrush.GradientStops.Add(new GradientStop(System.Windows.Media.Color.FromArgb(145, 8, 8, 12), 1.0));
+
+                    _spotlightWindow = new Window
+                    {
+                        WindowStyle = WindowStyle.None,
+                        AllowsTransparency = true,
+                        Background = System.Windows.Media.Brushes.Transparent,
+                        Topmost = true,
+                        ShowInTaskbar = false,
+                        IsHitTestVisible = false,
+                        Left = SystemParameters.VirtualScreenLeft,
+                        Top = SystemParameters.VirtualScreenTop,
+                        Width = SystemParameters.VirtualScreenWidth,
+                        Height = SystemParameters.VirtualScreenHeight,
+                        Content = new System.Windows.Shapes.Rectangle { Fill = _spotlightBrush }
+                    };
+
+                    _spotlightWindow.SourceInitialized += (s, e) =>
+                    {
+                        var hwnd = new WindowInteropHelper(_spotlightWindow).Handle;
+                        int ex = GetWindowLong(hwnd, GWL_EXSTYLE);
+                        SetWindowLong(hwnd, GWL_EXSTYLE, ex | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE);
+                    };
+                }
+
+                _spotlightWindow.Opacity = 0;
+                _spotlightWindow.Show();
+                _spotlightWindow.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(220)));
+                _overlay.EnforceTopmost();
+            }
+            else if (_spotlightWindow != null)
+            {
+                var fadeOut = new DoubleAnimation(0.0, TimeSpan.FromMilliseconds(180));
+                fadeOut.Completed += (s, e) => _spotlightWindow?.Hide();
+                _spotlightWindow.BeginAnimation(OpacityProperty, fadeOut);
+            }
+        }
+
+        // Feature 3: Quick-Switch Status Chip (Ctrl + Alt + 1 / 2 / 3)
+        private void TriggerStatusChip(string statusLabel, string hexColor)
+        {
+            if (_activeStatusText == statusLabel)
+            {
+                _activeStatusText = null;
+                _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
+                return;
+            }
+
+            _isShowingKeys = false;
+            _typedKeys.Clear();
+            _activeStatusText = statusLabel;
+            _statusExpiryTime = DateTime.UtcNow.AddSeconds(5);
+            _lastActivityTime = DateTime.UtcNow;
+
+            _overlay.SetIdleState(false);
+            _overlay.ShowStatusChip(statusLabel, hexColor);
+        }
+
+        private void RestoreNameOrStatus()
+        {
+            if (!string.IsNullOrEmpty(_activeStatusText) && DateTime.UtcNow < _statusExpiryTime)
+            {
+                string color = _activeStatusText.StartsWith("👀") ? "#38BDF8"
+                             : _activeStatusText.StartsWith("⏸") ? "#F59E0B"
+                             : "#34D399";
+                _overlay.ShowStatusChip(_activeStatusText, color);
+            }
+            else
+            {
+                _activeStatusText = null;
+                _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
+            }
         }
 
         private void OnOverlaySourceInitialized(object? sender, EventArgs e)
@@ -234,6 +383,10 @@ namespace Tagsor
             source?.AddHook(WndProc);
 
             RegisterHotKey(hwnd, HOTKEY_PRIVACY_ID, MOD_CONTROL | MOD_ALT, VK_H);
+            RegisterHotKey(hwnd, HOTKEY_SPOTLIGHT_ID, MOD_CONTROL | MOD_ALT, VK_S);
+            RegisterHotKey(hwnd, HOTKEY_STATUS_1_ID, MOD_CONTROL | MOD_ALT, VK_1);
+            RegisterHotKey(hwnd, HOTKEY_STATUS_2_ID, MOD_CONTROL | MOD_ALT, VK_2);
+            RegisterHotKey(hwnd, HOTKEY_STATUS_3_ID, MOD_CONTROL | MOD_ALT, VK_3);
 
             RawInputDevice.RegisterDevice(HidUsageAndPage.Mouse, RawInputDeviceFlags.InputSink, hwnd);
             RawInputDevice.RegisterDevice(HidUsageAndPage.Keyboard, RawInputDeviceFlags.InputSink, hwnd);
@@ -254,6 +407,16 @@ namespace Tagsor
                 var dpi = VisualTreeHelper.GetDpi(_overlay);
                 double cursorDipX = pt.X / dpi.DpiScaleX;
                 double cursorDipY = pt.Y / dpi.DpiScaleY;
+
+                // Update Spotlight radial cutout center
+                if (_isSpotlightActive && _spotlightBrush != null)
+                {
+                    var center = new System.Windows.Point(
+                        cursorDipX - SystemParameters.VirtualScreenLeft,
+                        cursorDipY - SystemParameters.VirtualScreenTop);
+                    _spotlightBrush.Center = center;
+                    _spotlightBrush.GradientOrigin = center;
+                }
 
                 double screenW = SystemParameters.VirtualScreenWidth;
                 double screenH = SystemParameters.VirtualScreenHeight;
@@ -284,14 +447,29 @@ namespace Tagsor
                 _overlay.Top = _currentOverlayY;
             }
 
-            if (_isShowingKeys && (DateTime.UtcNow - _lastKeyTime).TotalSeconds >= 1.0)
+            // Feature 1: Promote held button to visible LMB/RMB/MMB badge after 220ms
+            if (_heldMouseButton != null && !_holdBadgeShown && (DateTime.UtcNow - _mouseDownTime).TotalMilliseconds >= 220)
+            {
+                _holdBadgeShown = true;
+                _overlay.SetHoldIndicator(_heldMouseButton);
+            }
+
+            // Revert keystrokes back to name or active status chip after 1.1s
+            if (_isShowingKeys && (DateTime.UtcNow - _lastKeyTime).TotalSeconds >= 1.1)
             {
                 _isShowingKeys = false;
                 _typedKeys.Clear();
+                RestoreNameOrStatus();
+            }
+
+            // Revert temporary status chip after 5s
+            if (!_isShowingKeys && !string.IsNullOrEmpty(_activeStatusText) && DateTime.UtcNow >= _statusExpiryTime)
+            {
+                _activeStatusText = null;
                 _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
             }
 
-            bool isIdle = (DateTime.UtcNow - _lastActivityTime).TotalSeconds > 2.5;
+            bool isIdle = !_isSpotlightActive && _heldMouseButton == null && (DateTime.UtcNow - _lastActivityTime).TotalSeconds > 2.5;
             _overlay.SetIdleState(isIdle);
 
             if (++_topmostTickCounter >= 15)
@@ -355,10 +533,31 @@ namespace Tagsor
 
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
         {
-            if (msg == WM_HOTKEY && wParam.ToInt32() == HOTKEY_PRIVACY_ID)
+            if (msg == WM_HOTKEY)
             {
-                TogglePrivacyMode();
-                handled = true;
+                switch (wParam.ToInt32())
+                {
+                    case HOTKEY_PRIVACY_ID:
+                        TogglePrivacyMode();
+                        handled = true;
+                        break;
+                    case HOTKEY_SPOTLIGHT_ID:
+                        if (!_isOverlayPaused) ToggleSpotlight();
+                        handled = true;
+                        break;
+                    case HOTKEY_STATUS_1_ID:
+                        if (!_isOverlayPaused) TriggerStatusChip("👀 Look here", "#38BDF8");
+                        handled = true;
+                        break;
+                    case HOTKEY_STATUS_2_ID:
+                        if (!_isOverlayPaused) TriggerStatusChip("⏸ Hold on", "#F59E0B");
+                        handled = true;
+                        break;
+                    case HOTKEY_STATUS_3_ID:
+                        if (!_isOverlayPaused) TriggerStatusChip("✅ Done", "#34D399");
+                        handled = true;
+                        break;
+                }
             }
             else if (msg == WM_INPUT && !_isOverlayPaused)
             {
@@ -373,9 +572,24 @@ namespace Tagsor
 
             if (data is RawInputKeyboardData keyboardData)
             {
+                int vk = keyboardData.Keyboard.VirutalKey;
+
+                // Pressing Escape dismisses an active status chip or spotlight immediately
+                if (!keyboardData.Keyboard.Flags.HasFlag(RawKeyboardFlags.Up) && vk == 0x1B)
+                {
+                    if (!string.IsNullOrEmpty(_activeStatusText))
+                    {
+                        _activeStatusText = null;
+                        _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
+                    }
+                    if (_isSpotlightActive)
+                    {
+                        ToggleSpotlight();
+                    }
+                }
+
                 if (_isPrivacyMode) return;
 
-                int vk = keyboardData.Keyboard.VirutalKey;
                 if (!keyboardData.Keyboard.Flags.HasFlag(RawKeyboardFlags.Up) && vk > 0 && vk < 255)
                 {
                     if (IsPasswordFieldFocused()) return;
@@ -387,11 +601,19 @@ namespace Tagsor
                         _lastKeyTime = DateTime.UtcNow;
                         _isShowingKeys = true;
 
-                        if (_typedKeys.Count >= 3)
+                        // Feature 4: Stack consecutive identical keystrokes (e.g., Ctrl+Z ×3 or Backspace ×4)
+                        if (_typedKeys.Count > 0 && _typedKeys[^1].KeyId == keyItem.KeyId)
                         {
-                            _typedKeys.Clear();
+                            _typedKeys[^1].RepeatCount++;
                         }
-                        _typedKeys.Add(keyItem);
+                        else
+                        {
+                            if (_typedKeys.Count >= 3)
+                            {
+                                _typedKeys.Clear();
+                            }
+                            _typedKeys.Add(keyItem);
+                        }
 
                         _overlay.ShowTypedKeys(_typedKeys);
                     }
@@ -403,15 +625,66 @@ namespace Tagsor
             {
                 _lastActivityTime = DateTime.UtcNow;
 
-                _overlay.SetTiltFromVelocity(mouseData.Mouse.LastX);
+                int dx = mouseData.Mouse.LastX;
+                _overlay.SetTiltFromVelocity(dx);
 
+                // Feature 5: Detect rapid horizontal shake-to-locate
+                if (Math.Abs(dx) >= 18)
+                {
+                    int dir = Math.Sign(dx);
+                    if (dir != _lastMoveDirection)
+                    {
+                        if ((DateTime.UtcNow - _shakeWindowStart).TotalMilliseconds > 420)
+                        {
+                            _directionFlipCount = 0;
+                            _shakeWindowStart = DateTime.UtcNow;
+                        }
+
+                        _lastMoveDirection = dir;
+                        _directionFlipCount++;
+
+                        if (_directionFlipCount >= 4)
+                        {
+                            _directionFlipCount = 0;
+                            _overlay.TriggerShakeSurge();
+                        }
+                    }
+                }
+
+                // Feature 1: Click Ripple, Double-Click Detection & Drag-Hold Tracking
                 var buttons = mouseData.Mouse.Buttons;
-                if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonDown) || buttons.HasFlag(RawMouseButtonFlags.RightButtonDown))
-                    _overlay.TriggerClickAnimation(true, isMiddleClick: false);
+                if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonDown))
+                {
+                    bool isDoubleClick = (DateTime.UtcNow - _lastLeftClickTime).TotalMilliseconds <= 350;
+                    _lastLeftClickTime = DateTime.UtcNow;
+
+                    _heldMouseButton = "LMB";
+                    _mouseDownTime = DateTime.UtcNow;
+                    _holdBadgeShown = false;
+                    _overlay.TriggerClickAnimation(true, "LMB", isDoubleClick);
+                }
+                else if (buttons.HasFlag(RawMouseButtonFlags.RightButtonDown))
+                {
+                    _heldMouseButton = "RMB";
+                    _mouseDownTime = DateTime.UtcNow;
+                    _holdBadgeShown = false;
+                    _overlay.TriggerClickAnimation(true, "RMB");
+                }
                 else if (buttons.HasFlag(RawMouseButtonFlags.MiddleButtonDown))
-                    _overlay.TriggerClickAnimation(true, isMiddleClick: true);
-                else if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonUp) || buttons.HasFlag(RawMouseButtonFlags.RightButtonUp) || buttons.HasFlag(RawMouseButtonFlags.MiddleButtonUp))
+                {
+                    _heldMouseButton = "MMB";
+                    _mouseDownTime = DateTime.UtcNow;
+                    _holdBadgeShown = false;
+                    _overlay.TriggerClickAnimation(true, "MMB");
+                }
+                else if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonUp) ||
+                         buttons.HasFlag(RawMouseButtonFlags.RightButtonUp) ||
+                         buttons.HasFlag(RawMouseButtonFlags.MiddleButtonUp))
+                {
+                    _heldMouseButton = null;
+                    _holdBadgeShown = false;
                     _overlay.TriggerClickAnimation(false);
+                }
 
                 if (buttons.HasFlag(RawMouseButtonFlags.MouseWheel))
                 {
@@ -426,7 +699,7 @@ namespace Tagsor
                     if (_activeProfile.Name != savedProfile.Name || _activeProfile.AccentHex != savedProfile.AccentHex)
                     {
                         _activeProfile = savedProfile;
-                        if (!_isShowingKeys)
+                        if (!_isShowingKeys && string.IsNullOrEmpty(_activeStatusText))
                         {
                             _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex);
                         }
@@ -439,7 +712,7 @@ namespace Tagsor
                         _activeProfile = new MouseProfile { Name = "Zaki", AccentHex = "#60A5FA" };
                         _savedMice[deviceId] = _activeProfile;
                         SaveMiceToDisk();
-                        if (!_isShowingKeys)
+                        if (!_isShowingKeys && string.IsNullOrEmpty(_activeStatusText))
                         {
                             _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex);
                         }
@@ -458,81 +731,86 @@ namespace Tagsor
             Key wpfKey = KeyInterop.KeyFromVirtualKey(vkCode);
             if (wpfKey == Key.None) return null;
 
+            string keyId = wpfKey.ToString();
+
             switch (wpfKey)
             {
                 case Key.Return:
-                    return new KeyDisplayItem { IconGeometry = "M 19,5 V 11 A 4,4 0 0 1 15,15 H 5 M 9,11 L 5,15 L 9,19" };
+                    return new KeyDisplayItem { KeyId = keyId, IconGeometry = "M 19,5 V 11 A 4,4 0 0 1 15,15 H 5 M 9,11 L 5,15 L 9,19" };
                 case Key.Space:
-                    return new KeyDisplayItem { IconGeometry = "M 3,13 V 16 A 1.5,1.5 0 0 0 4.5,17.5 H 19.5 A 1.5,1.5 0 0 0 21,16 V 13" };
+                    return new KeyDisplayItem { KeyId = keyId, IconGeometry = "M 3,13 V 16 A 1.5,1.5 0 0 0 4.5,17.5 H 19.5 A 1.5,1.5 0 0 0 21,16 V 13" };
                 case Key.LeftShift:
                 case Key.RightShift:
-                    return new KeyDisplayItem { IconGeometry = "M 12,3 L 21,12 H 16 V 20 A 1,1 0 0 1 15,21 H 9 A 1,1 0 0 1 8,20 V 12 H 3 Z" };
+                    return new KeyDisplayItem { KeyId = "Shift", IconGeometry = "M 12,3 L 21,12 H 16 V 20 A 1,1 0 0 1 15,21 H 9 A 1,1 0 0 1 8,20 V 12 H 3 Z" };
                 case Key.LeftCtrl:
                 case Key.RightCtrl:
-                    return new KeyDisplayItem { IconGeometry = "M 5,15 L 12,8 L 19,15" };
+                    return new KeyDisplayItem { KeyId = "Ctrl", IconGeometry = "M 5,15 L 12,8 L 19,15" };
                 case Key.LeftAlt:
                 case Key.RightAlt:
-                    return new KeyDisplayItem { IconGeometry = "M 3,6 H 8.5 L 15.5,18 H 21 M 15,6 H 21" };
+                    return new KeyDisplayItem { KeyId = "Alt", IconGeometry = "M 3,6 H 8.5 L 15.5,18 H 21 M 15,6 H 21" };
                 case Key.LWin:
                 case Key.RWin:
-                    return new KeyDisplayItem { IconGeometry = "M 3,3 H 10.5 V 10.5 H 3 Z M 13.5,3 H 21 V 10.5 H 13.5 Z M 3,13.5 H 10.5 V 21 H 3 Z M 13.5,13.5 H 21 V 21 H 13.5 Z" };
+                    return new KeyDisplayItem { KeyId = "Win", IconGeometry = "M 3,3 H 10.5 V 10.5 H 3 Z M 13.5,3 H 21 V 10.5 H 13.5 Z M 3,13.5 H 10.5 V 21 H 3 Z M 13.5,13.5 H 21 V 21 H 13.5 Z" };
                 case Key.Back:
-                    return new KeyDisplayItem { IconGeometry = "M 9,4 H 20 A 2,2 0 0 1 22,6 V 18 A 2,2 0 0 1 20,20 H 9 L 2,12 Z M 12,9.5 L 17,14.5 M 17,9.5 L 12,14.5" };
+                    return new KeyDisplayItem { KeyId = keyId, IconGeometry = "M 9,4 H 20 A 2,2 0 0 1 22,6 V 18 A 2,2 0 0 1 20,20 H 9 L 2,12 Z M 12,9.5 L 17,14.5 M 17,9.5 L 12,14.5" };
                 case Key.Tab:
-                    return new KeyDisplayItem { IconGeometry = "M 3,12 H 16 M 11,7 L 16,12 L 11,17 M 20,5 V 19" };
+                    return new KeyDisplayItem { KeyId = keyId, IconGeometry = "M 3,12 H 16 M 11,7 L 16,12 L 11,17 M 20,5 V 19" };
                 case Key.Capital:
-                    return new KeyDisplayItem { IconGeometry = "M 12,3 L 20,11 H 15.5 V 16 H 8.5 V 11 H 4 Z M 8,20 H 16" };
+                    return new KeyDisplayItem { KeyId = keyId, IconGeometry = "M 12,3 L 20,11 H 15.5 V 16 H 8.5 V 11 H 4 Z M 8,20 H 16" };
                 case Key.Up:
-                    return new KeyDisplayItem { IconGeometry = "M 12,20 V 4 M 6,10 L 12,4 L 18,10" };
+                    return new KeyDisplayItem { KeyId = keyId, IconGeometry = "M 12,20 V 4 M 6,10 L 12,4 L 18,10" };
                 case Key.Down:
-                    return new KeyDisplayItem { IconGeometry = "M 12,4 V 20 M 6,14 L 12,20 L 18,14" };
+                    return new KeyDisplayItem { KeyId = keyId, IconGeometry = "M 12,4 V 20 M 6,14 L 12,20 L 18,14" };
                 case Key.Left:
-                    return new KeyDisplayItem { IconGeometry = "M 20,12 H 4 M 10,6 L 4,12 L 10,18" };
+                    return new KeyDisplayItem { KeyId = keyId, IconGeometry = "M 20,12 H 4 M 10,6 L 4,12 L 10,18" };
                 case Key.Right:
-                    return new KeyDisplayItem { IconGeometry = "M 4,12 H 20 M 14,6 L 20,12 L 14,18" };
+                    return new KeyDisplayItem { KeyId = keyId, IconGeometry = "M 4,12 H 20 M 14,6 L 20,12 L 14,18" };
 
-                case Key.Escape: return new KeyDisplayItem { Label = "Esc" };
-                case Key.Delete: return new KeyDisplayItem { Label = "Del" };
-                case Key.Insert: return new KeyDisplayItem { Label = "Ins" };
-                case Key.Home: return new KeyDisplayItem { Label = "Home" };
-                case Key.End: return new KeyDisplayItem { Label = "End" };
-                case Key.PageUp: return new KeyDisplayItem { Label = "PgUp" };
-                case Key.PageDown: return new KeyDisplayItem { Label = "PgDn" };
-                case Key.PrintScreen: return new KeyDisplayItem { Label = "PrtSc" };
-                case Key.NumLock: return new KeyDisplayItem { Label = "Num" };
-                case Key.Scroll: return new KeyDisplayItem { Label = "ScrLk" };
-                case Key.Pause: return new KeyDisplayItem { Label = "Pause" };
-                case Key.Apps: return new KeyDisplayItem { Label = "Menu" };
-                case Key.VolumeMute: return new KeyDisplayItem { Label = "Mute" };
-                case Key.VolumeUp: return new KeyDisplayItem { Label = "Vol+" };
-                case Key.VolumeDown: return new KeyDisplayItem { Label = "Vol-" };
-                case Key.MediaPlayPause: return new KeyDisplayItem { Label = "Play" };
-                case Key.MediaNextTrack: return new KeyDisplayItem { Label = "Next" };
-                case Key.MediaPreviousTrack: return new KeyDisplayItem { Label = "Prev" };
+                case Key.Escape: return new KeyDisplayItem { KeyId = keyId, Label = "Esc" };
+                case Key.Delete: return new KeyDisplayItem { KeyId = keyId, Label = "Del" };
+                case Key.Insert: return new KeyDisplayItem { KeyId = keyId, Label = "Ins" };
+                case Key.Home: return new KeyDisplayItem { KeyId = keyId, Label = "Home" };
+                case Key.End: return new KeyDisplayItem { KeyId = keyId, Label = "End" };
+                case Key.PageUp: return new KeyDisplayItem { KeyId = keyId, Label = "PgUp" };
+                case Key.PageDown: return new KeyDisplayItem { KeyId = keyId, Label = "PgDn" };
+                case Key.PrintScreen: return new KeyDisplayItem { KeyId = keyId, Label = "PrtSc" };
+                case Key.NumLock: return new KeyDisplayItem { KeyId = keyId, Label = "Num" };
+                case Key.Scroll: return new KeyDisplayItem { KeyId = keyId, Label = "ScrLk" };
+                case Key.Pause: return new KeyDisplayItem { KeyId = keyId, Label = "Pause" };
+                case Key.Apps: return new KeyDisplayItem { KeyId = keyId, Label = "Menu" };
+                case Key.VolumeMute: return new KeyDisplayItem { KeyId = keyId, Label = "Mute" };
+                case Key.VolumeUp: return new KeyDisplayItem { KeyId = keyId, Label = "Vol+" };
+                case Key.VolumeDown: return new KeyDisplayItem { KeyId = keyId, Label = "Vol-" };
+                case Key.MediaPlayPause: return new KeyDisplayItem { KeyId = keyId, Label = "Play" };
+                case Key.MediaNextTrack: return new KeyDisplayItem { KeyId = keyId, Label = "Next" };
+                case Key.MediaPreviousTrack: return new KeyDisplayItem { KeyId = keyId, Label = "Prev" };
 
                 case >= Key.D0 and <= Key.D9:
-                    return new KeyDisplayItem { Label = ((char)('0' + (wpfKey - Key.D0))).ToString() };
+                    string dLabel = ((char)('0' + (wpfKey - Key.D0))).ToString();
+                    return new KeyDisplayItem { KeyId = dLabel, Label = dLabel };
                 case >= Key.NumPad0 and <= Key.NumPad9:
-                    return new KeyDisplayItem { Label = ((char)('0' + (wpfKey - Key.NumPad0))).ToString() };
-                case Key.Multiply: return new KeyDisplayItem { Label = "*" };
-                case Key.Add: return new KeyDisplayItem { Label = "+" };
-                case Key.Subtract: return new KeyDisplayItem { Label = "-" };
-                case Key.Decimal: return new KeyDisplayItem { Label = "." };
-                case Key.Divide: return new KeyDisplayItem { Label = "/" };
+                    string nLabel = ((char)('0' + (wpfKey - Key.NumPad0))).ToString();
+                    return new KeyDisplayItem { KeyId = nLabel, Label = nLabel };
+                case Key.Multiply: return new KeyDisplayItem { KeyId = "*", Label = "*" };
+                case Key.Add: return new KeyDisplayItem { KeyId = "+", Label = "+" };
+                case Key.Subtract: return new KeyDisplayItem { KeyId = "-", Label = "-" };
+                case Key.Decimal: return new KeyDisplayItem { KeyId = ".", Label = "." };
+                case Key.Divide: return new KeyDisplayItem { KeyId = "/", Label = "/" };
                 case >= Key.F1 and <= Key.F12:
-                    return new KeyDisplayItem { Label = wpfKey.ToString() };
+                    return new KeyDisplayItem { KeyId = keyId, Label = keyId };
             }
 
             uint mappedChar = MapVirtualKey((uint)vkCode, MAPVK_VK_TO_CHAR) & 0xFFFF;
             if (mappedChar > 0 && !char.IsControl((char)mappedChar))
             {
-                return new KeyDisplayItem { Label = char.ToUpperInvariant((char)mappedChar).ToString() };
+                string ch = char.ToUpperInvariant((char)mappedChar).ToString();
+                return new KeyDisplayItem { KeyId = ch, Label = ch };
             }
 
             string fallback = wpfKey.ToString();
             if (fallback.StartsWith("Oem", StringComparison.OrdinalIgnoreCase)) return null;
 
-            return new KeyDisplayItem { Label = fallback };
+            return new KeyDisplayItem { KeyId = fallback, Label = fallback };
         }
 
         private void PromptForNewMouseName(string deviceId)
@@ -548,7 +826,7 @@ namespace Tagsor
                 _savedMice[deviceId] = _activeProfile;
                 SaveMiceToDisk();
 
-                if (!_isShowingKeys)
+                if (!_isShowingKeys && string.IsNullOrEmpty(_activeStatusText))
                 {
                     _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex);
                 }
