@@ -84,52 +84,38 @@ namespace Tagsor
 
         // 1A. Click Ripple + Double-Click Pulse
         public void TriggerClickAnimation(bool isPressed, string buttonType = "LMB", bool isDoubleClick = false)
-        {
-            if (isPressed)
-            {
-                string ringHex = buttonType switch
                 {
-                    "RMB" => "#F59E0B",
-                    "MMB" => "#F472B6",
-                    _ => _accentHex
-                };
+                    if (isPressed)
+                    {
+                        string activeHex = buttonType switch
+                        {
+                            "RMB" => "#F59E0B",
+                            "MMB" => "#F472B6",
+                            _ => _accentHex
+                        };
 
-                var ringBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(ringHex));
-                ClickRippleRing.Stroke = ringBrush;
-                PillBorder.BorderBrush = ringBrush;
+                        PillBorder.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(activeHex));
 
-                // Spawn expanding click ripple at cursor tip
-                double targetRipple = isDoubleClick ? 2.1 : 1.55;
-                var rippleScaleAnim = new DoubleAnimation(0.25, targetRipple, TimeSpan.FromMilliseconds(320))
-                {
-                    EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
-                };
-                var rippleFadeAnim = new DoubleAnimation(0.95, 0.0, TimeSpan.FromMilliseconds(320));
-
-                RippleScale.BeginAnimation(ScaleTransform.ScaleXProperty, rippleScaleAnim);
-                RippleScale.BeginAnimation(ScaleTransform.ScaleYProperty, rippleScaleAnim);
-                ClickRippleRing.BeginAnimation(OpacityProperty, rippleFadeAnim);
-
-                // Pill press compression (or double-click pop)
-                double targetScale = isDoubleClick ? 1.16 : (buttonType == "MMB" ? 0.85 : 0.91);
-                var ease = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.45 };
-                var scaleAnim = new DoubleAnimation(targetScale, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease };
-                PillScale.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
-                PillScale.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
-            }
-            else
-            {
-                SetHoldIndicator(null);
-                if (!_isShakeSurging)
-                {
-                    var ease = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.45 };
-                    var scaleAnim = new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease };
-                    PillScale.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
-                    PillScale.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
+                        // Pill press compression (or double-click pop)
+                        double targetScale = isDoubleClick ? 1.16 : (buttonType == "MMB" ? 0.85 : 0.91);
+                        var ease = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.45 };
+                        var scaleAnim = new DoubleAnimation(targetScale, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease };
+                        PillScale.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
+                        PillScale.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
+                    }
+                    else
+                    {
+                        SetHoldIndicator(null);
+                        if (!_isShakeSurging)
+                        {
+                            var ease = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.45 };
+                            var scaleAnim = new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease };
+                            PillScale.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
+                            PillScale.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
+                        }
+                        ApplyRestBorder();
+                    }
                 }
-                ApplyRestBorder();
-            }
-        }
 
         // 1B. Drag-Hold Badge (LMB / RMB / MMB)
         public void SetHoldIndicator(string? buttonLabel)

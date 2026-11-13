@@ -15,23 +15,7 @@
         UseLayoutRounding="True"
         SnapsToDevicePixels="True">
 
-    <Grid Margin="18">
-        <!-- Expanding Click Ripple Ring -->
-        <Ellipse x:Name="ClickRippleRing"
-                 Width="26"
-                 Height="26"
-                 HorizontalAlignment="Left"
-                 VerticalAlignment="Top"
-                 Margin="-9,-9,0,0"
-                 Stroke="#60A5FA"
-                 StrokeThickness="2"
-                 Opacity="0"
-                 RenderTransformOrigin="0.5,0.5">
-            <Ellipse.RenderTransform>
-                <ScaleTransform x:Name="RippleScale" ScaleX="0.3" ScaleY="0.3" />
-            </Ellipse.RenderTransform>
-        </Ellipse>
-
+    <Grid Margin="12">
         <!-- Main Floating Pill -->
         <Border x:Name="PillBorder"
                 HorizontalAlignment="Left"
