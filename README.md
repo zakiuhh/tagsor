@@ -50,7 +50,7 @@ When you're sharing your screen on a call, recording a tutorial, or plugging two
 Make sure you have the [.NET 8.0 SDK](https://dotnet.microsoft.com/download/dotnet/8.0) installed on Windows 10 or 11.
 
 ```bash
-git clone [https://github.com/zakiuhh/tagsor.git](https://github.com/zakiuhh/tagsor.git)
+git clone https://github.com/zakiuhh/tagsor.git
 cd Tagsor
 dotnet run
 ```
