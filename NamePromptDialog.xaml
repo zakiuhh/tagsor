@@ -225,9 +225,11 @@
                             Click="CloseButton_Click"/>
                 </Grid>
 
-                <TextBlock Text="Display name"
+                <TextBlock x:Name="FieldLabel"
+                           Text="Display name"
                            Foreground="{DynamicResource SecondaryTextBrush}"
                            FontSize="12"
+                           TextWrapping="Wrap"
                            Margin="0,0,0,6"/>
 
                 <TextBox x:Name="NameInput"

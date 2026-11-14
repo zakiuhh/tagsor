@@ -40,7 +40,7 @@
             <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                 <Grid>
                     <TextBlock x:Name="UserNameLabel"
-                               Text="Zaki"
+                               Text="Guest"
                                Foreground="#EFEFEF"
                                FontFamily="Segoe UI"
                                FontSize="12.5"

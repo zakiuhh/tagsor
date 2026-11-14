@@ -9,14 +9,15 @@ namespace Tagsor
 {
     public partial class NamePromptDialog : Window
     {
-        public string EnteredName { get; private set; } = "Guest";
-        public string SelectedAccentHex { get; private set; } = "#60A5FA";
+        public string EnteredName { get; private set; } = MouseProfile.DefaultName;
+        public string SelectedAccentHex { get; private set; } = MouseProfile.DefaultAccentHex;
         private bool _isClosing = false;
 
-        public NamePromptDialog(string? promptTitle = null, string? initialName = null)
+        public NamePromptDialog(string? promptTitle = null, string? initialName = null, string? fieldLabel = null)
         {
             InitializeComponent();
             if (!string.IsNullOrEmpty(promptTitle)) HeaderLabel.Text = promptTitle;
+            if (!string.IsNullOrEmpty(fieldLabel)) FieldLabel.Text = fieldLabel;
             if (!string.IsNullOrEmpty(initialName)) NameInput.Text = initialName;
 
             SyncWithWindowsTheme();

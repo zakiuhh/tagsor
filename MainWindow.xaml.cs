@@ -56,9 +56,10 @@ namespace Tagsor
         private readonly string _saveFilePath;
         private Dictionary<string, MouseProfile> _savedMice = new();
         private readonly HashSet<string> _promptingDevices = new();
+        private readonly HashSet<string> _skippedDevices = new();
         private CursorOverlay _overlay = null!;
         private string _activeDeviceId = "";
-        private MouseProfile _activeProfile = new() { Name = "Zaki", AccentHex = "#60A5FA" };
+        private MouseProfile _activeProfile = new();
 
         private DispatcherTimer _trackingTimer = null!;
         private int _topmostTickCounter = 0;
@@ -83,6 +84,10 @@ namespace Tagsor
 
         // Drag-Hold & Double-Click State
         private string? _heldMouseButton = null;
+        private readonly HashSet<string> _pressedButtons = new();
+        private const int VK_LBUTTON = 0x01;
+        private const int VK_RBUTTON = 0x02;
+        private const int VK_MBUTTON = 0x04;
         private DateTime _mouseDownTime = DateTime.MinValue;
         private bool _holdBadgeShown = false;
         private DateTime _lastLeftClickTime = DateTime.MinValue;
@@ -124,6 +129,9 @@ namespace Tagsor
         private static extern uint MapVirtualKey(uint uCode, uint uMapType);
 
         [DllImport("user32.dll")]
+        private static extern short GetAsyncKeyState(int vKey);
+
+        [DllImport("user32.dll")]
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
         [DllImport("user32.dll")]
@@ -148,9 +156,11 @@ namespace Tagsor
             this.ShowInTaskbar = false;
             this.Visibility = Visibility.Hidden;
 
-            string appDataFolder = IOPath.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "DualCursorApp");
+            string roamingAppData = Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+            string appDataFolder = IOPath.Combine(roamingAppData, "Tagsor");
             Directory.CreateDirectory(appDataFolder);
             _saveFilePath = IOPath.Combine(appDataFolder, "saved_mice.json");
+            MigrateLegacySaveFile(IOPath.Combine(roamingAppData, "DualCursorApp"));
 
             LoadSavedMice();
             _markerColorHex = _activeProfile.AccentHex;
@@ -284,9 +294,10 @@ namespace Tagsor
         {
             _savedMice.Clear();
             SaveMiceToDisk();
+            _skippedDevices.Clear();
             _activeDeviceId = "";
             _activeStatusText = null;
-            _activeProfile = new MouseProfile { Name = "Zaki", AccentHex = "#60A5FA" };
+            _activeProfile = new MouseProfile();
             _markerColorHex = _activeProfile.AccentHex;
             _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
         }
@@ -1247,6 +1258,8 @@ namespace Tagsor
                 _overlay.Top = _currentOverlayY;
             }
 
+            SyncMouseButtonsFromAsyncState();
+
             if (_heldMouseButton != null && !_holdBadgeShown && (DateTime.UtcNow - _mouseDownTime).TotalMilliseconds >= 220)
             {
                 _holdBadgeShown = true;
@@ -1426,7 +1439,7 @@ namespace Tagsor
                 return;
             }
 
-            if (data is RawInputMouseData mouseData && mouseData.Device != null)
+            if (data is RawInputMouseData mouseData)
             {
                 _lastActivityTime = DateTime.UtcNow;
 
@@ -1455,46 +1468,29 @@ namespace Tagsor
                     }
                 }
 
+                // A single raw report can carry several button flags (e.g. a fast click reports
+                // down and up together), so handle every flag instead of an else-if chain.
+                // Button handling must not depend on the device lookup below: synthesized input
+                // (touchpads, remote desktop, mouse-sharing tools, some drivers) has no device handle.
                 var buttons = mouseData.Mouse.Buttons;
-                if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonDown))
-                {
-                    bool isDoubleClick = (DateTime.UtcNow - _lastLeftClickTime).TotalMilliseconds <= 350;
-                    _lastLeftClickTime = DateTime.UtcNow;
-
-                    _heldMouseButton = "LMB";
-                    _mouseDownTime = DateTime.UtcNow;
-                    _holdBadgeShown = false;
-                    _overlay.TriggerClickAnimation(true, "LMB", isDoubleClick);
-                }
-                else if (buttons.HasFlag(RawMouseButtonFlags.RightButtonDown))
-                {
-                    _heldMouseButton = "RMB";
-                    _mouseDownTime = DateTime.UtcNow;
-                    _holdBadgeShown = false;
-                    _overlay.TriggerClickAnimation(true, "RMB");
-                }
-                else if (buttons.HasFlag(RawMouseButtonFlags.MiddleButtonDown))
-                {
-                    _heldMouseButton = "MMB";
-                    _mouseDownTime = DateTime.UtcNow;
-                    _holdBadgeShown = false;
-                    _overlay.TriggerClickAnimation(true, "MMB");
-                }
-                else if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonUp) ||
-                         buttons.HasFlag(RawMouseButtonFlags.RightButtonUp) ||
-                         buttons.HasFlag(RawMouseButtonFlags.MiddleButtonUp))
-                {
-                    _heldMouseButton = null;
-                    _holdBadgeShown = false;
-                    _overlay.TriggerClickAnimation(false);
-                }
+                if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonDown)) OnMouseButtonChanged("LMB", true);
+                if (buttons.HasFlag(RawMouseButtonFlags.RightButtonDown)) OnMouseButtonChanged("RMB", true);
+                if (buttons.HasFlag(RawMouseButtonFlags.MiddleButtonDown)) OnMouseButtonChanged("MMB", true);
+                if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonUp)) OnMouseButtonChanged("LMB", false);
+                if (buttons.HasFlag(RawMouseButtonFlags.RightButtonUp)) OnMouseButtonChanged("RMB", false);
+                if (buttons.HasFlag(RawMouseButtonFlags.MiddleButtonUp)) OnMouseButtonChanged("MMB", false);
 
                 if (buttons.HasFlag(RawMouseButtonFlags.MouseWheel))
                 {
                     _overlay.TriggerScrollBounce(mouseData.Mouse.ButtonData);
                 }
 
-                string deviceId = mouseData.Device.DevicePath ?? mouseData.Header.DeviceHandle.ToString();
+                // Per-mouse profiles need a real device; input without one keeps the current profile.
+                RawInputDevice? sourceDevice = null;
+                try { sourceDevice = mouseData.Device; } catch { }
+                if (sourceDevice == null) return;
+
+                string deviceId = sourceDevice.DevicePath ?? mouseData.Header.DeviceHandle.ToString();
                 _activeDeviceId = deviceId;
 
                 if (_savedMice.TryGetValue(deviceId, out MouseProfile? savedProfile))
@@ -1509,25 +1505,76 @@ namespace Tagsor
                         }
                     }
                 }
-                else if (!_promptingDevices.Contains(deviceId))
+                else if (!_promptingDevices.Contains(deviceId) && !_skippedDevices.Contains(deviceId))
                 {
-                    if (_savedMice.Count == 0)
-                    {
-                        _activeProfile = new MouseProfile { Name = "Zaki", AccentHex = "#60A5FA" };
-                        _markerColorHex = _activeProfile.AccentHex;
-                        _savedMice[deviceId] = _activeProfile;
-                        SaveMiceToDisk();
-                        if (!_isShowingKeys && string.IsNullOrEmpty(_activeStatusText))
-                        {
-                            _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex);
-                        }
-                    }
-                    else
-                    {
-                        _promptingDevices.Add(deviceId);
-                        Dispatcher.BeginInvoke(() => PromptForNewMouseName(deviceId));
-                    }
+                    // Unknown mouse: always ask for a name. On a fresh install (nothing saved yet)
+                    // this is the first-run welcome prompt.
+                    bool isFirstRun = _savedMice.Count == 0;
+                    _promptingDevices.Add(deviceId);
+                    Dispatcher.BeginInvoke(() => PromptForNewMouseName(deviceId, isFirstRun));
                 }
+            }
+        }
+
+        private void OnMouseButtonChanged(string label, bool isDown)
+        {
+            var now = DateTime.UtcNow;
+
+            if (isDown)
+            {
+                if (!_pressedButtons.Add(label)) return; // already tracked as held
+
+                _lastActivityTime = now;
+
+                bool isDoubleClick = false;
+                if (label == "LMB")
+                {
+                    isDoubleClick = (now - _lastLeftClickTime).TotalMilliseconds <= 350;
+                    _lastLeftClickTime = now;
+                }
+
+                _heldMouseButton = label;
+                _mouseDownTime = now;
+                _holdBadgeShown = false;
+                _overlay.TriggerClickAnimation(true, label, isDoubleClick);
+                return;
+            }
+
+            if (!_pressedButtons.Remove(label)) return;
+            _lastActivityTime = now;
+
+            if (_pressedButtons.Count > 0)
+            {
+                // Another button is still held: keep showing that one.
+                _heldMouseButton = _pressedButtons.First();
+                _mouseDownTime = now;
+                _holdBadgeShown = false;
+                _overlay.SetHoldIndicator(null);
+                _overlay.TriggerClickAnimation(true, _heldMouseButton);
+            }
+            else
+            {
+                _heldMouseButton = null;
+                _holdBadgeShown = false;
+                _overlay.TriggerClickAnimation(false);
+            }
+        }
+
+        // Safety net: raw input can miss button events (injected input, UI-privilege boundaries,
+        // driver quirks). Reconcile with the real button state; OnMouseButtonChanged is idempotent.
+        private void SyncMouseButtonsFromAsyncState()
+        {
+            ReconcileButton("LMB", VK_LBUTTON);
+            ReconcileButton("RMB", VK_RBUTTON);
+            ReconcileButton("MMB", VK_MBUTTON);
+        }
+
+        private void ReconcileButton(string label, int virtualKey)
+        {
+            bool isDown = (GetAsyncKeyState(virtualKey) & 0x8000) != 0;
+            if (isDown != _pressedButtons.Contains(label))
+            {
+                OnMouseButtonChanged(label, isDown);
             }
         }
 
@@ -1618,9 +1665,12 @@ namespace Tagsor
             return new KeyDisplayItem { KeyId = fallback, Label = fallback };
         }
 
-        private void PromptForNewMouseName(string deviceId)
+        private void PromptForNewMouseName(string deviceId, bool isFirstRun)
         {
-            var dialog = new NamePromptDialog();
+            var dialog = isFirstRun
+                ? new NamePromptDialog("Welcome to Tagsor", Environment.UserName, "What should we call you? This name is shown next to your cursor.")
+                : new NamePromptDialog();
+
             if (dialog.ShowDialog() == true)
             {
                 _activeProfile = new MouseProfile
@@ -1637,7 +1687,35 @@ namespace Tagsor
                     _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex);
                 }
             }
+            else
+            {
+                // Dismissed: don't nag on every mouse movement. Asked again on next launch,
+                // or any time via tray menu > Rename mouse.
+                _skippedDevices.Add(deviceId);
+            }
             _promptingDevices.Remove(deviceId);
+        }
+
+        // Older versions stored profiles in %AppData%\DualCursorApp. Move them to %AppData%\Tagsor once,
+        // so existing users keep their saved names instead of being asked again.
+        private void MigrateLegacySaveFile(string legacyFolder)
+        {
+            try
+            {
+                string legacyFile = IOPath.Combine(legacyFolder, "saved_mice.json");
+                if (File.Exists(_saveFilePath) || !File.Exists(legacyFile)) return;
+
+                File.Move(legacyFile, _saveFilePath);
+
+                if (!Directory.EnumerateFileSystemEntries(legacyFolder).Any())
+                {
+                    Directory.Delete(legacyFolder);
+                }
+            }
+            catch
+            {
+                // Best effort: if the move fails the app simply asks for names again.
+            }
         }
 
         private void LoadSavedMice()

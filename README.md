@@ -86,8 +86,10 @@ Click (left or right) the **Tagsor** icon in your system tray to open the quick 
 Your saved mouse names and accent colors are stored locally on your machine in JSON format:
 
 ```text
-%AppData%\DualCursorApp\saved_mice.json
+%AppData%\Tagsor\saved_mice.json
 ```
+
+Older versions used `%AppData%\DualCursorApp\saved_mice.json`. Tagsor moves that file to the new location automatically the first time it starts.
 
 *(Everything runs 100% locally on your PC—no internet connection, telemetry, or background accounts.)*
 

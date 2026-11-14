@@ -133,7 +133,7 @@
                     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
                         <Ellipse x:Name="StatusDot" Width="7" Height="7" Fill="#60A5FA" Margin="0,0,7,0"/>
                         <TextBlock x:Name="ActiveUserBadge"
-                                   Text="Zaki"
+                                   Text="Guest"
                                    Foreground="{DynamicResource PrimaryTextBrush}"
                                    FontSize="12.5"
                                    FontWeight="SemiBold"/>
