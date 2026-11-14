@@ -450,12 +450,10 @@ namespace Tagsor
                         var last = _rawStrokePoints[^1];
                         double dist = Distance(pt, last);
 
-                        // Ignore sub-2.5px hand jitter so curves stay fluid and hold timer triggers reliably
                         if (dist >= 2.5)
                         {
                             if (_shapeSnappedDuringStroke)
                             {
-                                // Allow dynamic resizing/aiming after a shape snaps if the user keeps dragging
                                 _rawStrokePoints[^1] = pt;
                                 TrySnapCurrentStrokeToShape(isDynamicResize: true);
                             }
@@ -464,7 +462,6 @@ namespace Tagsor
                                 _rawStrokePoints.Add(pt);
                                 _currentStrokePath.Data = BuildSmoothSplineGeometry(_rawStrokePoints);
 
-                                // Reset hold-to-snap timer while actively drawing
                                 _shapeHoldTimer?.Stop();
                                 _shapeHoldTimer?.Start();
                             }
@@ -555,7 +552,6 @@ namespace Tagsor
                 return geometry;
             }
 
-            // Light Laplacian smoothing pass before spline conversion removes micro-tremors
             var pts = new List<System.Windows.Point>(points.Count) { points[0] };
             for (int i = 1; i < points.Count - 1; i++)
             {
@@ -605,7 +601,7 @@ namespace Tagsor
             double maxY = pts.Max(p => p.Y);
             double width = maxX - minX;
             double height = maxY - minY;
-            double diag = Math.Hypot(width, height);
+            double diag = Hypot(width, height);
 
             if (diag < 24) return;
 
@@ -621,7 +617,6 @@ namespace Tagsor
 
             if (!isClosed)
             {
-                // 1. Check for Checkmark (✓): 2 major directional limbs forming a V-dip
                 var simplifiedOpen = DouglasPeucker(pts, diag * 0.08);
                 if (simplifiedOpen.Count == 3)
                 {
@@ -644,10 +639,8 @@ namespace Tagsor
                     }
                 }
 
-                // 2. Check for Arrow (➔): either user drew a hooked tip at the end OR a straight directional stroke with small return hook
                 if (snappedGeometry == null && simplifiedOpen.Count >= 3 && simplifiedOpen.Count <= 5)
                 {
-                    // Detect return hook near the end of the stroke
                     int splitIdx = (int)(pts.Count * 0.72);
                     var shaftStart = pts[0];
                     var tip = pts[splitIdx];
@@ -655,10 +648,7 @@ namespace Tagsor
                     for (int i = splitIdx; i < pts.Count; i++)
                     {
                         double d = Distance(pts[i], tip);
-                        if (d > maxTailDist)
-                        {
-                            maxTailDist = d;
-                        }
+                        if (d > maxTailDist) maxTailDist = d;
                     }
 
                     double shaftLen = Distance(shaftStart, tip);
@@ -669,7 +659,6 @@ namespace Tagsor
                     }
                 }
 
-                // 3. Straight Line (──): low perpendicular deviation from start-to-end segment
                 if (snappedGeometry == null)
                 {
                     double maxDeviation = 0;
@@ -683,7 +672,6 @@ namespace Tagsor
                     {
                         var p1 = pts[0];
                         var p2 = pts[^1];
-                        // Snap nearly-horizontal or nearly-vertical lines cleanly
                         double angleRad = Math.Abs(Math.Atan2(p2.Y - p1.Y, p2.X - p1.X));
                         if (angleRad < 0.12 || Math.Abs(angleRad - Math.PI) < 0.12)
                             p2 = new System.Windows.Point(p2.X, p1.Y);
@@ -697,12 +685,10 @@ namespace Tagsor
             }
             else
             {
-                // Closed shape analysis
                 var center = new System.Windows.Point((minX + maxX) / 2.0, (minY + maxY) / 2.0);
                 double rx = width / 2.0;
                 double ry = height / 2.0;
 
-                // Measure normalized elliptical distance error (0 = perfect ellipse/circle)
                 double radialErrorSum = 0;
                 var radii = new List<double>(pts.Count);
                 foreach (var p in pts)
@@ -715,13 +701,11 @@ namespace Tagsor
                 }
                 double meanRadialError = radialErrorSum / pts.Count;
 
-                // Simplify closed polygon to count distinct vertices
                 var closedPts = new List<System.Windows.Point>(pts) { pts[0] };
                 var simplified = DouglasPeucker(closedPts, diag * 0.065);
                 if (simplified.Count > 1 && Distance(simplified[0], simplified[^1]) < 15)
                     simplified.RemoveAt(simplified.Count - 1);
 
-                // Count radial peaks for Star (☆) detection
                 int peaks = CountRadialPeaks(radii);
 
                 if (peaks == 5 && simplified.Count >= 8)
@@ -780,7 +764,6 @@ namespace Tagsor
 
                 if (!isDynamicResize)
                 {
-                    // Subtle scale pop feedback when shape snaps
                     var center = new System.Windows.Point((minX + maxX) / 2.0, (minY + maxY) / 2.0);
                     var st = new ScaleTransform(1.06, 1.06, center.X, center.Y);
                     _currentStrokePath.RenderTransform = st;
@@ -800,7 +783,7 @@ namespace Tagsor
         {
             double angle = Math.Atan2(tip.Y - start.Y, tip.X - start.X);
             double headLen = Math.Clamp(Distance(start, tip) * 0.22, 14, 28);
-            const double wingAngle = 0.48; // ~27.5 degrees
+            const double wingAngle = 0.48;
 
             var leftWing = new System.Windows.Point(
                 tip.X - headLen * Math.Cos(angle - wingAngle),
@@ -904,7 +887,7 @@ namespace Tagsor
         {
             double dx = lineEnd.X - lineStart.X;
             double dy = lineEnd.Y - lineStart.Y;
-            double mag = Math.Hypot(dx, dy);
+            double mag = Hypot(dx, dy);
             if (mag < 1e-6) return Distance(pt, lineStart);
             return Math.Abs(dy * pt.X - dx * pt.Y + lineEnd.X * lineStart.Y - lineEnd.Y * lineStart.X) / mag;
         }
@@ -914,14 +897,16 @@ namespace Tagsor
             double v1x = a.X - b.X, v1y = a.Y - b.Y;
             double v2x = c.X - b.X, v2y = c.Y - b.Y;
             double dot = v1x * v2x + v1y * v2y;
-            double mag = Math.Hypot(v1x, v1y) * Math.Hypot(v2x, v2y);
+            double mag = Hypot(v1x, v1y) * Hypot(v2x, v2y);
             if (mag < 1e-6) return 0;
             return Math.Acos(Math.Clamp(dot / mag, -1.0, 1.0)) * (180.0 / Math.PI);
         }
 
+        private static double Hypot(double x, double y) => Math.Sqrt(x * x + y * y);
+
         private static double Distance(System.Windows.Point a, System.Windows.Point b)
         {
-            return Math.Hypot(a.X - b.X, a.Y - b.Y);
+            return Hypot(a.X - b.X, a.Y - b.Y);
         }
 
         private Border BuildMarkerSidebar()
@@ -1224,7 +1209,6 @@ namespace Tagsor
                 double cursorDipX = pt.X / dpi.DpiScaleX;
                 double cursorDipY = pt.Y / dpi.DpiScaleY;
 
-                // Update Spotlight radial cutout center
                 if (_isSpotlightActive && _spotlightBrush != null)
                 {
                     var center = new System.Windows.Point(
@@ -1263,14 +1247,12 @@ namespace Tagsor
                 _overlay.Top = _currentOverlayY;
             }
 
-            // Promote held button to visible LMB/RMB/MMB badge after 220ms
             if (_heldMouseButton != null && !_holdBadgeShown && (DateTime.UtcNow - _mouseDownTime).TotalMilliseconds >= 220)
             {
                 _holdBadgeShown = true;
                 _overlay.SetHoldIndicator(_heldMouseButton);
             }
 
-            // Revert keystrokes back to name or active status chip after 1.1s
             if (_isShowingKeys && (DateTime.UtcNow - _lastKeyTime).TotalSeconds >= 1.1)
             {
                 _isShowingKeys = false;
@@ -1278,7 +1260,6 @@ namespace Tagsor
                 RestoreNameOrStatus();
             }
 
-            // Revert temporary status chip after 5s
             if (!_isShowingKeys && !string.IsNullOrEmpty(_activeStatusText) && DateTime.UtcNow >= _statusExpiryTime)
             {
                 _activeStatusText = null;
@@ -1396,7 +1377,6 @@ namespace Tagsor
             {
                 int vk = keyboardData.Keyboard.VirutalKey;
 
-                // Pressing Escape dismisses Draw Mode, Spotlight, or Status Chips immediately
                 if (!keyboardData.Keyboard.Flags.HasFlag(RawKeyboardFlags.Up) && vk == 0x1B)
                 {
                     if (_isMarkerActive)
@@ -1453,7 +1433,6 @@ namespace Tagsor
                 int dx = mouseData.Mouse.LastX;
                 _overlay.SetTiltFromVelocity(dx);
 
-                // Detect rapid horizontal shake-to-locate
                 if (Math.Abs(dx) >= 18)
                 {
                     int dir = Math.Sign(dx);
@@ -1476,7 +1455,6 @@ namespace Tagsor
                     }
                 }
 
-                // Double-Click Detection & Drag-Hold Tracking
                 var buttons = mouseData.Mouse.Buttons;
                 if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonDown))
                 {
