@@ -10,21 +10,27 @@ namespace Tagsor
     {
         public event Action? OnEditMouseRequested;
         public event Action? OnResetMiceRequested;
+        public event Action? OnToggleSpotlightRequested;
+        public event Action? OnToggleMarkerRequested;
+        public event Action<string, string>? OnStatusChipRequested;
         public event Action? OnTogglePrivacyRequested;
         public event Action? OnTogglePauseRequested;
         public event Action? OnExitRequested;
 
         private bool _closed = false;
 
-        public TrayMenuPopup(string activeUserName, string accentHex, bool isPrivacyMode, bool isPaused)
+        public TrayMenuPopup(string activeUserName, string accentHex, bool isPrivacyMode, bool isPaused, bool isSpotlightActive, bool isMarkerActive)
         {
             InitializeComponent();
 
             ActiveUserBadge.Text = activeUserName;
             PrivacyCheck.Visibility = isPrivacyMode ? Visibility.Visible : Visibility.Collapsed;
             PauseCheck.Visibility = isPaused ? Visibility.Visible : Visibility.Collapsed;
+            SpotlightCheck.Visibility = isSpotlightActive ? Visibility.Visible : Visibility.Collapsed;
+            MarkerCheck.Visibility = isMarkerActive ? Visibility.Visible : Visibility.Collapsed;
+
             StatusDot.Fill = new SolidColorBrush((Color)ColorConverter.ConvertFromString(isPaused ? "#FBBF24" : accentHex));
-            StatusText.Text = isPaused ? "Paused" : "Active";
+            StatusText.Text = isPaused ? "Paused" : (isMarkerActive ? "Drawing" : "Active");
 
             SyncWithWindowsTheme();
 
@@ -106,6 +112,36 @@ namespace Tagsor
         {
             SafeClose();
             OnResetMiceRequested?.Invoke();
+        }
+
+        private void Spotlight_Click(object sender, RoutedEventArgs e)
+        {
+            SafeClose();
+            OnToggleSpotlightRequested?.Invoke();
+        }
+
+        private void Marker_Click(object sender, RoutedEventArgs e)
+        {
+            SafeClose();
+            OnToggleMarkerRequested?.Invoke();
+        }
+
+        private void Chip1_Click(object sender, RoutedEventArgs e)
+        {
+            SafeClose();
+            OnStatusChipRequested?.Invoke("👀 Look here", "#38BDF8");
+        }
+
+        private void Chip2_Click(object sender, RoutedEventArgs e)
+        {
+            SafeClose();
+            OnStatusChipRequested?.Invoke("⏸ Hold on", "#F59E0B");
+        }
+
+        private void Chip3_Click(object sender, RoutedEventArgs e)
+        {
+            SafeClose();
+            OnStatusChipRequested?.Invoke("✅ Done", "#34D399");
         }
 
         private void Privacy_Click(object sender, RoutedEventArgs e)

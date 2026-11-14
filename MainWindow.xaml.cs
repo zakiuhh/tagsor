@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using System.Windows;
@@ -12,6 +13,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Effects;
 using System.Windows.Shapes;
 using System.Windows.Threading;
 using Linearstar.Windows.RawInput;
@@ -33,11 +35,13 @@ namespace Tagsor
         private const int HOTKEY_STATUS_1_ID = 9003;
         private const int HOTKEY_STATUS_2_ID = 9004;
         private const int HOTKEY_STATUS_3_ID = 9005;
+        private const int HOTKEY_MARKER_ID = 9006;
 
         private const uint MOD_ALT = 0x0001;
         private const uint MOD_CONTROL = 0x0002;
         private const uint VK_H = 0x48;
         private const uint VK_S = 0x53;
+        private const uint VK_D = 0x44;
         private const uint VK_1 = 0x31;
         private const uint VK_2 = 0x32;
         private const uint VK_3 = 0x33;
@@ -68,6 +72,7 @@ namespace Tagsor
 
         private bool _isOverlayPaused = false;
         private bool _isPrivacyMode = false;
+        private bool _isLightTheme = false;
         private Forms.NotifyIcon _trayIcon = null!;
         private TrayMenuPopup? _activeTrayMenu;
 
@@ -76,22 +81,35 @@ namespace Tagsor
         private DateTime _lastKeyTime = DateTime.MinValue;
         private bool _isShowingKeys = false;
 
-        // Feature 1: Drag-Hold & Double-Click State
+        // Drag-Hold & Double-Click State
         private string? _heldMouseButton = null;
         private DateTime _mouseDownTime = DateTime.MinValue;
         private bool _holdBadgeShown = false;
         private DateTime _lastLeftClickTime = DateTime.MinValue;
 
-        // Feature 2: Spotlight Dimmer Overlay State
+        // Spotlight Dimmer Overlay State
         private Window? _spotlightWindow;
         private RadialGradientBrush? _spotlightBrush;
         private bool _isSpotlightActive = false;
 
-        // Feature 3: Quick-Switch Status Chip State
+        // Live Screen Marker, Smooth Splines & Hold-to-Snap Shape State (Ctrl + Alt + D)
+        private Window? _markerWindow;
+        private Canvas? _markerCanvas;
+        private System.Windows.Shapes.Path? _currentStrokePath;
+        private readonly List<System.Windows.Point> _rawStrokePoints = new();
+        private DispatcherTimer? _shapeHoldTimer;
+        private bool _shapeSnappedDuringStroke = false;
+        private bool _isMarkerActive = false;
+        private bool _isHighlighterMode = false;
+        private double _markerStrokeWidth = 4.0;
+        private string _markerColorHex = "#60A5FA";
+        private bool _markerAutoFade = true;
+
+        // Quick-Switch Status Chip State
         private string? _activeStatusText = null;
         private DateTime _statusExpiryTime = DateTime.MinValue;
 
-        // Feature 5: Shake-to-Locate Velocity Tracking
+        // Shake-to-Locate Velocity Tracking
         private int _lastMoveDirection = 0;
         private int _directionFlipCount = 0;
         private DateTime _shakeWindowStart = DateTime.MinValue;
@@ -135,6 +153,7 @@ namespace Tagsor
             _saveFilePath = IOPath.Combine(appDataFolder, "saved_mice.json");
 
             LoadSavedMice();
+            _markerColorHex = _activeProfile.AccentHex;
             RegisterWindowsStartup();
             SetupSystemTray();
 
@@ -156,6 +175,7 @@ namespace Tagsor
             this.Closed += (s, e) =>
             {
                 _trackingTimer.Stop();
+                _shapeHoldTimer?.Stop();
                 SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
                 var hwnd = new WindowInteropHelper(_overlay).Handle;
                 UnregisterHotKey(hwnd, HOTKEY_PRIVACY_ID);
@@ -163,7 +183,9 @@ namespace Tagsor
                 UnregisterHotKey(hwnd, HOTKEY_STATUS_1_ID);
                 UnregisterHotKey(hwnd, HOTKEY_STATUS_2_ID);
                 UnregisterHotKey(hwnd, HOTKEY_STATUS_3_ID);
+                UnregisterHotKey(hwnd, HOTKEY_MARKER_ID);
                 _spotlightWindow?.Close();
+                _markerWindow?.Close();
                 _trayIcon.Visible = false;
                 _trayIcon.Dispose();
                 _overlay.Close();
@@ -208,9 +230,19 @@ namespace Tagsor
                 return;
             }
 
-            _activeTrayMenu = new TrayMenuPopup(_activeProfile.Name, _activeProfile.AccentHex, _isPrivacyMode, _isOverlayPaused);
+            _activeTrayMenu = new TrayMenuPopup(
+                _activeProfile.Name,
+                _activeProfile.AccentHex,
+                _isPrivacyMode,
+                _isOverlayPaused,
+                _isSpotlightActive,
+                _isMarkerActive);
+
             _activeTrayMenu.OnEditMouseRequested += EditActiveMouse;
             _activeTrayMenu.OnResetMiceRequested += ResetSavedMice;
+            _activeTrayMenu.OnToggleSpotlightRequested += () => { if (!_isOverlayPaused) ToggleSpotlight(); };
+            _activeTrayMenu.OnToggleMarkerRequested += () => { if (!_isOverlayPaused) ToggleMarkerMode(); };
+            _activeTrayMenu.OnStatusChipRequested += (label, hex) => { if (!_isOverlayPaused) TriggerStatusChip(label, hex); };
             _activeTrayMenu.OnTogglePrivacyRequested += TogglePrivacyMode;
             _activeTrayMenu.OnTogglePauseRequested += TogglePauseOverlay;
             _activeTrayMenu.OnExitRequested += Close;
@@ -235,6 +267,7 @@ namespace Tagsor
                     Name = dialog.EnteredName,
                     AccentHex = dialog.SelectedAccentHex
                 };
+                _markerColorHex = _activeProfile.AccentHex;
 
                 if (!string.IsNullOrEmpty(_activeDeviceId))
                 {
@@ -254,6 +287,7 @@ namespace Tagsor
             _activeDeviceId = "";
             _activeStatusText = null;
             _activeProfile = new MouseProfile { Name = "Zaki", AccentHex = "#60A5FA" };
+            _markerColorHex = _activeProfile.AccentHex;
             _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
         }
 
@@ -278,6 +312,7 @@ namespace Tagsor
             {
                 _overlay.Hide();
                 if (_isSpotlightActive) ToggleSpotlight();
+                if (_isMarkerActive) ToggleMarkerMode();
             }
             else
             {
@@ -285,7 +320,7 @@ namespace Tagsor
             }
         }
 
-        // Feature 2: Spotlight Dimmer Toggle (Ctrl + Alt + S)
+        // Spotlight Dimmer Toggle (Ctrl + Alt + S)
         private void ToggleSpotlight()
         {
             _isSpotlightActive = !_isSpotlightActive;
@@ -340,7 +375,786 @@ namespace Tagsor
             }
         }
 
-        // Feature 3: Quick-Switch Status Chip (Ctrl + Alt + 1 / 2 / 3)
+        // Live Screen Marker + Smooth Catmull-Rom Splines + Hold-to-Snap Shape Recognition (Ctrl + Alt + D)
+        private void ToggleMarkerMode()
+        {
+            _isMarkerActive = !_isMarkerActive;
+
+            if (_isMarkerActive)
+            {
+                _markerWindow?.Close();
+                _markerColorHex = _activeProfile.AccentHex;
+
+                _shapeHoldTimer = new DispatcherTimer
+                {
+                    Interval = TimeSpan.FromMilliseconds(520)
+                };
+                _shapeHoldTimer.Tick += (s, e) =>
+                {
+                    _shapeHoldTimer.Stop();
+                    if (_currentStrokePath != null && !_shapeSnappedDuringStroke && _rawStrokePoints.Count >= 6)
+                    {
+                        TrySnapCurrentStrokeToShape();
+                    }
+                };
+
+                var rootGrid = new Grid();
+
+                _markerCanvas = new Canvas
+                {
+                    Background = new SolidColorBrush(System.Windows.Media.Color.FromArgb(1, 0, 0, 0)),
+                    Cursor = System.Windows.Input.Cursors.Pen
+                };
+
+                _markerCanvas.MouseLeftButtonDown += (s, e) =>
+                {
+                    _rawStrokePoints.Clear();
+                    _shapeSnappedDuringStroke = false;
+
+                    var startPt = e.GetPosition(_markerCanvas);
+                    _rawStrokePoints.Add(startPt);
+
+                    var baseColor = (System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(_markerColorHex);
+                    var strokeColor = _isHighlighterMode
+                        ? System.Windows.Media.Color.FromArgb(105, baseColor.R, baseColor.G, baseColor.B)
+                        : baseColor;
+
+                    _currentStrokePath = new System.Windows.Shapes.Path
+                    {
+                        Stroke = new SolidColorBrush(strokeColor),
+                        StrokeThickness = _isHighlighterMode ? _markerStrokeWidth * 3.4 : _markerStrokeWidth,
+                        StrokeStartLineCap = _isHighlighterMode ? PenLineCap.Flat : PenLineCap.Round,
+                        StrokeEndLineCap = _isHighlighterMode ? PenLineCap.Flat : PenLineCap.Round,
+                        StrokeLineJoin = PenLineJoin.Round,
+                        Data = BuildSmoothSplineGeometry(_rawStrokePoints),
+                        Effect = _isHighlighterMode ? null : new DropShadowEffect
+                        {
+                            Color = baseColor,
+                            BlurRadius = 10,
+                            ShadowDepth = 0,
+                            Opacity = 0.85
+                        }
+                    };
+
+                    _markerCanvas.Children.Add(_currentStrokePath);
+                    _markerCanvas.CaptureMouse();
+                    _shapeHoldTimer?.Stop();
+                    _shapeHoldTimer?.Start();
+                };
+
+                _markerCanvas.MouseMove += (s, e) =>
+                {
+                    if (_currentStrokePath != null && e.LeftButton == MouseButtonState.Pressed)
+                    {
+                        var pt = e.GetPosition(_markerCanvas);
+                        var last = _rawStrokePoints[^1];
+                        double dist = Distance(pt, last);
+
+                        // Ignore sub-2.5px hand jitter so curves stay fluid and hold timer triggers reliably
+                        if (dist >= 2.5)
+                        {
+                            if (_shapeSnappedDuringStroke)
+                            {
+                                // Allow dynamic resizing/aiming after a shape snaps if the user keeps dragging
+                                _rawStrokePoints[^1] = pt;
+                                TrySnapCurrentStrokeToShape(isDynamicResize: true);
+                            }
+                            else
+                            {
+                                _rawStrokePoints.Add(pt);
+                                _currentStrokePath.Data = BuildSmoothSplineGeometry(_rawStrokePoints);
+
+                                // Reset hold-to-snap timer while actively drawing
+                                _shapeHoldTimer?.Stop();
+                                _shapeHoldTimer?.Start();
+                            }
+                        }
+                    }
+                };
+
+                _markerCanvas.MouseLeftButtonUp += (s, e) =>
+                {
+                    _shapeHoldTimer?.Stop();
+
+                    if (_currentStrokePath != null)
+                    {
+                        var finishedPath = _currentStrokePath;
+                        _currentStrokePath = null;
+                        _markerCanvas.ReleaseMouseCapture();
+
+                        if (_markerAutoFade)
+                        {
+                            var fadeOut = new DoubleAnimation(1.0, 0.0, TimeSpan.FromMilliseconds(650))
+                            {
+                                BeginTime = TimeSpan.FromSeconds(2.4)
+                            };
+                            fadeOut.Completed += (_, _) => _markerCanvas?.Children.Remove(finishedPath);
+                            finishedPath.BeginAnimation(OpacityProperty, fadeOut);
+                        }
+                    }
+                };
+
+                rootGrid.Children.Add(_markerCanvas);
+                rootGrid.Children.Add(BuildMarkerSidebar());
+
+                _markerWindow = new Window
+                {
+                    WindowStyle = WindowStyle.None,
+                    AllowsTransparency = true,
+                    Background = System.Windows.Media.Brushes.Transparent,
+                    Topmost = true,
+                    ShowInTaskbar = false,
+                    Left = SystemParameters.VirtualScreenLeft,
+                    Top = SystemParameters.VirtualScreenTop,
+                    Width = SystemParameters.VirtualScreenWidth,
+                    Height = SystemParameters.VirtualScreenHeight,
+                    Content = rootGrid
+                };
+
+                _markerWindow.Show();
+                _markerWindow.Activate();
+                _overlay.EnforceTopmost();
+
+                TriggerStatusChip(_isHighlighterMode ? "🖍 Highlighter" : "✏️ Pen mode", _markerColorHex);
+            }
+            else if (_markerWindow != null)
+            {
+                _shapeHoldTimer?.Stop();
+                _currentStrokePath = null;
+                _markerWindow.Close();
+                _markerWindow = null;
+                _markerCanvas = null;
+
+                if (_activeStatusText != null && (_activeStatusText.StartsWith("✏️") || _activeStatusText.StartsWith("🖍") || _activeStatusText.StartsWith("✨")))
+                {
+                    _activeStatusText = null;
+                    _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
+                }
+            }
+        }
+
+        // --- Smooth Catmull-Rom to Cubic Bézier Spline Builder ---
+        private static PathGeometry BuildSmoothSplineGeometry(IReadOnlyList<System.Windows.Point> points)
+        {
+            var geometry = new PathGeometry();
+            if (points.Count == 0) return geometry;
+
+            var figure = new PathFigure { StartPoint = points[0], IsClosed = false };
+
+            if (points.Count == 1)
+            {
+                figure.Segments.Add(new LineSegment(new System.Windows.Point(points[0].X + 0.5, points[0].Y + 0.5), true));
+                geometry.Figures.Add(figure);
+                return geometry;
+            }
+
+            if (points.Count == 2)
+            {
+                figure.Segments.Add(new LineSegment(points[1], true));
+                geometry.Figures.Add(figure);
+                return geometry;
+            }
+
+            // Light Laplacian smoothing pass before spline conversion removes micro-tremors
+            var pts = new List<System.Windows.Point>(points.Count) { points[0] };
+            for (int i = 1; i < points.Count - 1; i++)
+            {
+                pts.Add(new System.Windows.Point(
+                    0.2 * points[i - 1].X + 0.6 * points[i].X + 0.2 * points[i + 1].X,
+                    0.2 * points[i - 1].Y + 0.6 * points[i].Y + 0.2 * points[i + 1].Y));
+            }
+            pts.Add(points[^1]);
+
+            var bezierPoints = new PointCollection();
+            const double tension = 0.5;
+
+            for (int i = 0; i < pts.Count - 1; i++)
+            {
+                var p0 = i == 0 ? pts[0] : pts[i - 1];
+                var p1 = pts[i];
+                var p2 = pts[i + 1];
+                var p3 = i + 2 < pts.Count ? pts[i + 2] : pts[^1];
+
+                var cp1 = new System.Windows.Point(
+                    p1.X + (p2.X - p0.X) * tension / 3.0,
+                    p1.Y + (p2.Y - p0.Y) * tension / 3.0);
+
+                var cp2 = new System.Windows.Point(
+                    p2.X - (p3.X - p1.X) * tension / 3.0,
+                    p2.Y - (p3.Y - p1.Y) * tension / 3.0);
+
+                bezierPoints.Add(cp1);
+                bezierPoints.Add(cp2);
+                bezierPoints.Add(p2);
+            }
+
+            figure.Segments.Add(new PolyBezierSegment(bezierPoints, true));
+            geometry.Figures.Add(figure);
+            return geometry;
+        }
+
+        // --- Hold-to-Snap Geometric Shape Recognizer ---
+        private void TrySnapCurrentStrokeToShape(bool isDynamicResize = false)
+        {
+            if (_currentStrokePath == null || _rawStrokePoints.Count < 6) return;
+
+            var pts = _rawStrokePoints;
+            double minX = pts.Min(p => p.X);
+            double maxX = pts.Max(p => p.X);
+            double minY = pts.Min(p => p.Y);
+            double maxY = pts.Max(p => p.Y);
+            double width = maxX - minX;
+            double height = maxY - minY;
+            double diag = Math.Hypot(width, height);
+
+            if (diag < 24) return;
+
+            double totalLength = 0;
+            for (int i = 1; i < pts.Count; i++)
+                totalLength += Distance(pts[i - 1], pts[i]);
+
+            double startEndDist = Distance(pts[0], pts[^1]);
+            bool isClosed = startEndDist < Math.Max(36, diag * 0.24) && totalLength > diag * 1.4;
+
+            Geometry? snappedGeometry = null;
+            string detectedName = "";
+
+            if (!isClosed)
+            {
+                // 1. Check for Checkmark (✓): 2 major directional limbs forming a V-dip
+                var simplifiedOpen = DouglasPeucker(pts, diag * 0.08);
+                if (simplifiedOpen.Count == 3)
+                {
+                    var a = simplifiedOpen[0];
+                    var b = simplifiedOpen[1];
+                    var c = simplifiedOpen[2];
+                    double leg1 = Distance(a, b);
+                    double leg2 = Distance(b, c);
+                    double angle = AngleBetween(a, b, c);
+
+                    if (b.Y > a.Y && b.Y > c.Y && leg2 > leg1 * 1.15 && angle >= 35 && angle <= 115)
+                    {
+                        var fig = new PathFigure { StartPoint = a, IsClosed = false };
+                        fig.Segments.Add(new LineSegment(b, true));
+                        fig.Segments.Add(new LineSegment(c, true));
+                        var pg = new PathGeometry();
+                        pg.Figures.Add(fig);
+                        snappedGeometry = pg;
+                        detectedName = "Checkmark";
+                    }
+                }
+
+                // 2. Check for Arrow (➔): either user drew a hooked tip at the end OR a straight directional stroke with small return hook
+                if (snappedGeometry == null && simplifiedOpen.Count >= 3 && simplifiedOpen.Count <= 5)
+                {
+                    // Detect return hook near the end of the stroke
+                    int splitIdx = (int)(pts.Count * 0.72);
+                    var shaftStart = pts[0];
+                    var tip = pts[splitIdx];
+                    double maxTailDist = 0;
+                    for (int i = splitIdx; i < pts.Count; i++)
+                    {
+                        double d = Distance(pts[i], tip);
+                        if (d > maxTailDist)
+                        {
+                            maxTailDist = d;
+                        }
+                    }
+
+                    double shaftLen = Distance(shaftStart, tip);
+                    if (shaftLen > 45 && maxTailDist > 12 && maxTailDist < shaftLen * 0.48 && Distance(pts[^1], tip) < shaftLen * 0.45)
+                    {
+                        snappedGeometry = BuildArrowGeometry(shaftStart, tip);
+                        detectedName = "Arrow";
+                    }
+                }
+
+                // 3. Straight Line (──): low perpendicular deviation from start-to-end segment
+                if (snappedGeometry == null)
+                {
+                    double maxDeviation = 0;
+                    for (int i = 1; i < pts.Count - 1; i++)
+                    {
+                        double dev = PerpendicularDistance(pts[i], pts[0], pts[^1]);
+                        if (dev > maxDeviation) maxDeviation = dev;
+                    }
+
+                    if (maxDeviation < Math.Max(14, startEndDist * 0.085))
+                    {
+                        var p1 = pts[0];
+                        var p2 = pts[^1];
+                        // Snap nearly-horizontal or nearly-vertical lines cleanly
+                        double angleRad = Math.Abs(Math.Atan2(p2.Y - p1.Y, p2.X - p1.X));
+                        if (angleRad < 0.12 || Math.Abs(angleRad - Math.PI) < 0.12)
+                            p2 = new System.Windows.Point(p2.X, p1.Y);
+                        else if (Math.Abs(angleRad - Math.PI / 2.0) < 0.12)
+                            p2 = new System.Windows.Point(p1.X, p2.Y);
+
+                        snappedGeometry = new LineGeometry(p1, p2);
+                        detectedName = "Line";
+                    }
+                }
+            }
+            else
+            {
+                // Closed shape analysis
+                var center = new System.Windows.Point((minX + maxX) / 2.0, (minY + maxY) / 2.0);
+                double rx = width / 2.0;
+                double ry = height / 2.0;
+
+                // Measure normalized elliptical distance error (0 = perfect ellipse/circle)
+                double radialErrorSum = 0;
+                var radii = new List<double>(pts.Count);
+                foreach (var p in pts)
+                {
+                    double nx = (p.X - center.X) / Math.Max(1, rx);
+                    double ny = (p.Y - center.Y) / Math.Max(1, ry);
+                    double normDist = Math.Sqrt(nx * nx + ny * ny);
+                    radialErrorSum += Math.Abs(normDist - 1.0);
+                    radii.Add(Distance(p, center));
+                }
+                double meanRadialError = radialErrorSum / pts.Count;
+
+                // Simplify closed polygon to count distinct vertices
+                var closedPts = new List<System.Windows.Point>(pts) { pts[0] };
+                var simplified = DouglasPeucker(closedPts, diag * 0.065);
+                if (simplified.Count > 1 && Distance(simplified[0], simplified[^1]) < 15)
+                    simplified.RemoveAt(simplified.Count - 1);
+
+                // Count radial peaks for Star (☆) detection
+                int peaks = CountRadialPeaks(radii);
+
+                if (peaks == 5 && simplified.Count >= 8)
+                {
+                    double outerR = Math.Max(rx, ry);
+                    snappedGeometry = BuildStarGeometry(center, outerR, outerR * 0.42);
+                    detectedName = "Star";
+                }
+                else if (meanRadialError < 0.135)
+                {
+                    double aspect = rx / Math.Max(1, ry);
+                    if (aspect >= 0.84 && aspect <= 1.18)
+                    {
+                        double r = (rx + ry) / 2.0;
+                        snappedGeometry = new EllipseGeometry(center, r, r);
+                        detectedName = "Circle";
+                    }
+                    else
+                    {
+                        snappedGeometry = new EllipseGeometry(center, rx, ry);
+                        detectedName = "Ellipse";
+                    }
+                }
+                else if (simplified.Count == 3)
+                {
+                    var fig = new PathFigure { StartPoint = simplified[0], IsClosed = true };
+                    fig.Segments.Add(new LineSegment(simplified[1], true));
+                    fig.Segments.Add(new LineSegment(simplified[2], true));
+                    var pg = new PathGeometry();
+                    pg.Figures.Add(fig);
+                    snappedGeometry = pg;
+                    detectedName = "Triangle";
+                }
+                else if (simplified.Count == 4 || meanRadialError >= 0.135)
+                {
+                    double aspect = width / Math.Max(1, height);
+                    if (aspect >= 0.85 && aspect <= 1.18)
+                    {
+                        double side = (width + height) / 2.0;
+                        var sqRect = new Rect(center.X - side / 2.0, center.Y - side / 2.0, side, side);
+                        snappedGeometry = new RectangleGeometry(sqRect, 6, 6);
+                        detectedName = "Square";
+                    }
+                    else
+                    {
+                        snappedGeometry = new RectangleGeometry(new Rect(minX, minY, width, height), 6, 6);
+                        detectedName = "Rectangle";
+                    }
+                }
+            }
+
+            if (snappedGeometry != null)
+            {
+                _shapeSnappedDuringStroke = true;
+                _currentStrokePath.Data = snappedGeometry;
+
+                if (!isDynamicResize)
+                {
+                    // Subtle scale pop feedback when shape snaps
+                    var center = new System.Windows.Point((minX + maxX) / 2.0, (minY + maxY) / 2.0);
+                    var st = new ScaleTransform(1.06, 1.06, center.X, center.Y);
+                    _currentStrokePath.RenderTransform = st;
+                    var settle = new DoubleAnimation(1.06, 1.0, TimeSpan.FromMilliseconds(180))
+                    {
+                        EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.4 }
+                    };
+                    st.BeginAnimation(ScaleTransform.ScaleXProperty, settle);
+                    st.BeginAnimation(ScaleTransform.ScaleYProperty, settle);
+
+                    TriggerStatusChip($"✨ {detectedName}", _markerColorHex);
+                }
+            }
+        }
+
+        private static PathGeometry BuildArrowGeometry(System.Windows.Point start, System.Windows.Point tip)
+        {
+            double angle = Math.Atan2(tip.Y - start.Y, tip.X - start.X);
+            double headLen = Math.Clamp(Distance(start, tip) * 0.22, 14, 28);
+            const double wingAngle = 0.48; // ~27.5 degrees
+
+            var leftWing = new System.Windows.Point(
+                tip.X - headLen * Math.Cos(angle - wingAngle),
+                tip.Y - headLen * Math.Sin(angle - wingAngle));
+
+            var rightWing = new System.Windows.Point(
+                tip.X - headLen * Math.Cos(angle + wingAngle),
+                tip.Y - headLen * Math.Sin(angle + wingAngle));
+
+            var pg = new PathGeometry();
+
+            var shaft = new PathFigure { StartPoint = start, IsClosed = false };
+            shaft.Segments.Add(new LineSegment(tip, true));
+            pg.Figures.Add(shaft);
+
+            var head = new PathFigure { StartPoint = leftWing, IsClosed = false };
+            head.Segments.Add(new LineSegment(tip, true));
+            head.Segments.Add(new LineSegment(rightWing, true));
+            pg.Figures.Add(head);
+
+            return pg;
+        }
+
+        private static PathGeometry BuildStarGeometry(System.Windows.Point center, double outerR, double innerR)
+        {
+            var pts = new List<System.Windows.Point>(10);
+            double startAngle = -Math.PI / 2.0;
+
+            for (int i = 0; i < 10; i++)
+            {
+                double r = (i % 2 == 0) ? outerR : innerR;
+                double a = startAngle + i * (Math.PI / 5.0);
+                pts.Add(new System.Windows.Point(center.X + r * Math.Cos(a), center.Y + r * Math.Sin(a)));
+            }
+
+            var fig = new PathFigure { StartPoint = pts[0], IsClosed = true };
+            for (int i = 1; i < pts.Count; i++)
+                fig.Segments.Add(new LineSegment(pts[i], true));
+
+            var pg = new PathGeometry();
+            pg.Figures.Add(fig);
+            return pg;
+        }
+
+        private static int CountRadialPeaks(List<double> radii)
+        {
+            if (radii.Count < 10) return 0;
+            double avg = radii.Average();
+            double minR = radii.Min();
+            double maxR = radii.Max();
+            if (maxR - minR < avg * 0.25) return 0;
+
+            int peaks = 0;
+            bool above = false;
+            double threshold = avg * 1.08;
+
+            foreach (double r in radii)
+            {
+                if (!above && r > threshold)
+                {
+                    above = true;
+                    peaks++;
+                }
+                else if (above && r < avg * 0.96)
+                {
+                    above = false;
+                }
+            }
+            return peaks;
+        }
+
+        private static List<System.Windows.Point> DouglasPeucker(IReadOnlyList<System.Windows.Point> points, double epsilon)
+        {
+            if (points.Count < 3) return new List<System.Windows.Point>(points);
+
+            double maxDist = 0;
+            int index = 0;
+            for (int i = 1; i < points.Count - 1; i++)
+            {
+                double d = PerpendicularDistance(points[i], points[0], points[^1]);
+                if (d > maxDist)
+                {
+                    index = i;
+                    maxDist = d;
+                }
+            }
+
+            if (maxDist > epsilon)
+            {
+                var left = DouglasPeucker(points.Take(index + 1).ToList(), epsilon);
+                var right = DouglasPeucker(points.Skip(index).ToList(), epsilon);
+                left.RemoveAt(left.Count - 1);
+                left.AddRange(right);
+                return left;
+            }
+
+            return new List<System.Windows.Point> { points[0], points[^1] };
+        }
+
+        private static double PerpendicularDistance(System.Windows.Point pt, System.Windows.Point lineStart, System.Windows.Point lineEnd)
+        {
+            double dx = lineEnd.X - lineStart.X;
+            double dy = lineEnd.Y - lineStart.Y;
+            double mag = Math.Hypot(dx, dy);
+            if (mag < 1e-6) return Distance(pt, lineStart);
+            return Math.Abs(dy * pt.X - dx * pt.Y + lineEnd.X * lineStart.Y - lineEnd.Y * lineStart.X) / mag;
+        }
+
+        private static double AngleBetween(System.Windows.Point a, System.Windows.Point b, System.Windows.Point c)
+        {
+            double v1x = a.X - b.X, v1y = a.Y - b.Y;
+            double v2x = c.X - b.X, v2y = c.Y - b.Y;
+            double dot = v1x * v2x + v1y * v2y;
+            double mag = Math.Hypot(v1x, v1y) * Math.Hypot(v2x, v2y);
+            if (mag < 1e-6) return 0;
+            return Math.Acos(Math.Clamp(dot / mag, -1.0, 1.0)) * (180.0 / Math.PI);
+        }
+
+        private static double Distance(System.Windows.Point a, System.Windows.Point b)
+        {
+            return Math.Hypot(a.X - b.X, a.Y - b.Y);
+        }
+
+        private Border BuildMarkerSidebar()
+        {
+            var bgBrush = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(_isLightTheme ? "#F8F8FA" : "#28282D"));
+            var borderBrush = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(_isLightTheme ? "#D4D4DC" : "#42424A"));
+            var textBrush = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(_isLightTheme ? "#18181B" : "#F3F3F5"));
+            var activePillBrush = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(_isLightTheme ? "#E4E4EC" : "#3A3A44"));
+            var dividerBrush = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(_isLightTheme ? "#E4E4EC" : "#383840"));
+
+            double leftOffset = Math.Max(0, -SystemParameters.VirtualScreenLeft) + 16;
+            double topOffset = Math.Max(0, -SystemParameters.VirtualScreenTop) + (SystemParameters.PrimaryScreenHeight / 2.0) - 210;
+
+            var sidebarSlide = new TranslateTransform(-24, 0);
+            var sidebarBorder = new Border
+            {
+                HorizontalAlignment = HorizontalAlignment.Left,
+                VerticalAlignment = VerticalAlignment.Top,
+                Margin = new Thickness(leftOffset, Math.Max(24, topOffset), 0, 0),
+                Background = bgBrush,
+                BorderBrush = borderBrush,
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(14),
+                Padding = new Thickness(7, 10, 7, 10),
+                Cursor = System.Windows.Input.Cursors.Arrow,
+                RenderTransform = sidebarSlide,
+                Effect = new DropShadowEffect
+                {
+                    BlurRadius = 18,
+                    ShadowDepth = 4,
+                    Opacity = _isLightTheme ? 0.22 : 0.55,
+                    Color = Colors.Black
+                }
+            };
+
+            sidebarBorder.Loaded += (s, e) =>
+            {
+                sidebarSlide.BeginAnimation(TranslateTransform.XProperty, new DoubleAnimation(-24, 0, TimeSpan.FromMilliseconds(220))
+                {
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                });
+            };
+
+            var stack = new StackPanel { Orientation = Orientation.Vertical };
+
+            // 1. Tool Mode: Pen vs Highlighter
+            var penBtn = CreateSidebarIconButton("✏️", "Pen tool (hold stroke to snap shape)", !_isHighlighterMode, textBrush, activePillBrush);
+            var highBtn = CreateSidebarIconButton("🖍", "Highlighter tool", _isHighlighterMode, textBrush, activePillBrush);
+
+            penBtn.Click += (s, e) =>
+            {
+                _isHighlighterMode = false;
+                penBtn.Background = activePillBrush;
+                highBtn.Background = System.Windows.Media.Brushes.Transparent;
+                TriggerStatusChip("✏️ Pen mode", _markerColorHex);
+            };
+
+            highBtn.Click += (s, e) =>
+            {
+                _isHighlighterMode = true;
+                highBtn.Background = activePillBrush;
+                penBtn.Background = System.Windows.Media.Brushes.Transparent;
+                TriggerStatusChip("🖍 Highlighter", _markerColorHex);
+            };
+
+            stack.Children.Add(penBtn);
+            stack.Children.Add(highBtn);
+            stack.Children.Add(CreateSidebarDivider(dividerBrush));
+
+            // 2. Stroke Width: Thin (3), Medium (6), Thick (11)
+            var widthButtons = new List<Button>();
+            double[] widths = { 3.0, 6.0, 11.0 };
+            double[] dotSizes = { 5.0, 9.0, 14.0 };
+            string[] widthTips = { "Thin stroke", "Medium stroke", "Thick stroke" };
+
+            for (int i = 0; i < widths.Length; i++)
+            {
+                double w = widths[i];
+                var dot = new Ellipse
+                {
+                    Width = dotSizes[i],
+                    Height = dotSizes[i],
+                    Fill = textBrush
+                };
+
+                var wBtn = new Button
+                {
+                    Width = 34,
+                    Height = 32,
+                    Margin = new Thickness(0, 2, 0, 2),
+                    Background = Math.Abs(_markerStrokeWidth - w) < 0.5 ? activePillBrush : System.Windows.Media.Brushes.Transparent,
+                    BorderThickness = new Thickness(0),
+                    Cursor = System.Windows.Input.Cursors.Hand,
+                    ToolTip = widthTips[i],
+                    Content = dot,
+                    Template = CreateRoundedButtonTemplate()
+                };
+
+                wBtn.Click += (s, e) =>
+                {
+                    _markerStrokeWidth = w;
+                    foreach (var b in widthButtons) b.Background = System.Windows.Media.Brushes.Transparent;
+                    wBtn.Background = activePillBrush;
+                };
+
+                widthButtons.Add(wBtn);
+                stack.Children.Add(wBtn);
+            }
+
+            stack.Children.Add(CreateSidebarDivider(dividerBrush));
+
+            // 3. Color Swatches
+            var swatchRings = new List<Border>();
+            string[] swatches = { _activeProfile.AccentHex, "#F87171", "#FBBF24", "#34D399", "#FFFFFF" };
+            string[] swatchNames = { "Accent color", "Coral Red", "Amber Yellow", "Emerald Green", "Pure White" };
+
+            for (int i = 0; i < swatches.Length; i++)
+            {
+                string hex = swatches[i];
+                var ring = new Border
+                {
+                    Width = 24,
+                    Height = 24,
+                    Margin = new Thickness(0, 3, 0, 3),
+                    CornerRadius = new CornerRadius(12),
+                    BorderThickness = new Thickness(2),
+                    BorderBrush = string.Equals(_markerColorHex, hex, StringComparison.OrdinalIgnoreCase)
+                        ? textBrush
+                        : System.Windows.Media.Brushes.Transparent,
+                    Cursor = System.Windows.Input.Cursors.Hand,
+                    ToolTip = swatchNames[i],
+                    Child = new Ellipse
+                    {
+                        Width = 16,
+                        Height = 16,
+                        Fill = new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString(hex)),
+                        Stroke = new SolidColorBrush(System.Windows.Media.Color.FromArgb(60, 128, 128, 128)),
+                        StrokeThickness = 1
+                    }
+                };
+
+                ring.MouseLeftButtonDown += (s, e) =>
+                {
+                    e.Handled = true;
+                    _markerColorHex = hex;
+                    foreach (var r in swatchRings) r.BorderBrush = System.Windows.Media.Brushes.Transparent;
+                    ring.BorderBrush = textBrush;
+                };
+
+                swatchRings.Add(ring);
+                stack.Children.Add(ring);
+            }
+
+            stack.Children.Add(CreateSidebarDivider(dividerBrush));
+
+            // 4. Pin Strokes (Disable Auto-Fade), Clear Canvas, Exit Draw Mode
+            var pinBtn = CreateSidebarIconButton("📌", "Keep strokes pinned (disable 2.5s auto-fade)", !_markerAutoFade, textBrush, activePillBrush);
+            pinBtn.Click += (s, e) =>
+            {
+                _markerAutoFade = !_markerAutoFade;
+                pinBtn.Background = !_markerAutoFade ? activePillBrush : System.Windows.Media.Brushes.Transparent;
+                TriggerStatusChip(_markerAutoFade ? "⏳ Auto-fade on" : "📌 Strokes pinned", _markerColorHex);
+            };
+
+            var clearBtn = CreateSidebarIconButton("🗑", "Clear all strokes", false, textBrush, activePillBrush);
+            clearBtn.Click += (s, e) => _markerCanvas?.Children.Clear();
+
+            var closeBtn = CreateSidebarIconButton("✕", "Exit Draw Mode (Esc)", false,
+                new SolidColorBrush((System.Windows.Media.Color)System.Windows.Media.ColorConverter.ConvertFromString("#FB7185")),
+                activePillBrush);
+            closeBtn.Click += (s, e) => ToggleMarkerMode();
+
+            stack.Children.Add(pinBtn);
+            stack.Children.Add(clearBtn);
+            stack.Children.Add(closeBtn);
+
+            sidebarBorder.Child = stack;
+            return sidebarBorder;
+        }
+
+        private static Button CreateSidebarIconButton(string glyph, string tooltip, bool isSelected, System.Windows.Media.Brush fg, System.Windows.Media.Brush activeBg)
+        {
+            return new Button
+            {
+                Width = 34,
+                Height = 32,
+                Margin = new Thickness(0, 2, 0, 2),
+                Background = isSelected ? activeBg : System.Windows.Media.Brushes.Transparent,
+                Foreground = fg,
+                FontSize = 14,
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                ToolTip = tooltip,
+                Content = new TextBlock
+                {
+                    Text = glyph,
+                    HorizontalAlignment = HorizontalAlignment.Center,
+                    VerticalAlignment = VerticalAlignment.Center
+                },
+                Template = CreateRoundedButtonTemplate()
+            };
+        }
+
+        private static Border CreateSidebarDivider(System.Windows.Media.Brush dividerBrush)
+        {
+            return new Border
+            {
+                Height = 1,
+                Margin = new Thickness(4, 6, 4, 6),
+                Background = dividerBrush
+            };
+        }
+
+        private static ControlTemplate CreateRoundedButtonTemplate()
+        {
+            var template = new ControlTemplate(typeof(Button));
+            var borderFactory = new FrameworkElementFactory(typeof(Border));
+            borderFactory.SetValue(Border.CornerRadiusProperty, new CornerRadius(8));
+            borderFactory.SetBinding(Border.BackgroundProperty, new System.Windows.Data.Binding("Background")
+            {
+                RelativeSource = new System.Windows.Data.RelativeSource(System.Windows.Data.RelativeSourceMode.TemplatedParent)
+            });
+
+            var contentFactory = new FrameworkElementFactory(typeof(ContentPresenter));
+            contentFactory.SetValue(HorizontalAlignmentProperty, HorizontalAlignment.Center);
+            contentFactory.SetValue(VerticalAlignmentProperty, VerticalAlignment.Center);
+            borderFactory.AppendChild(contentFactory);
+
+            template.VisualTree = borderFactory;
+            return template;
+        }
+
+        // Quick-Switch Status Chip (Ctrl + Alt + 1 / 2 / 3)
         private void TriggerStatusChip(string statusLabel, string hexColor)
         {
             if (_activeStatusText == statusLabel)
@@ -366,7 +1180,8 @@ namespace Tagsor
             {
                 string color = _activeStatusText.StartsWith("👀") ? "#38BDF8"
                              : _activeStatusText.StartsWith("⏸") ? "#F59E0B"
-                             : "#34D399";
+                             : _activeStatusText.StartsWith("✅") ? "#34D399"
+                             : _markerColorHex;
                 _overlay.ShowStatusChip(_activeStatusText, color);
             }
             else
@@ -387,6 +1202,7 @@ namespace Tagsor
             RegisterHotKey(hwnd, HOTKEY_STATUS_1_ID, MOD_CONTROL | MOD_ALT, VK_1);
             RegisterHotKey(hwnd, HOTKEY_STATUS_2_ID, MOD_CONTROL | MOD_ALT, VK_2);
             RegisterHotKey(hwnd, HOTKEY_STATUS_3_ID, MOD_CONTROL | MOD_ALT, VK_3);
+            RegisterHotKey(hwnd, HOTKEY_MARKER_ID, MOD_CONTROL | MOD_ALT, VK_D);
 
             RawInputDevice.RegisterDevice(HidUsageAndPage.Mouse, RawInputDeviceFlags.InputSink, hwnd);
             RawInputDevice.RegisterDevice(HidUsageAndPage.Keyboard, RawInputDeviceFlags.InputSink, hwnd);
@@ -447,7 +1263,7 @@ namespace Tagsor
                 _overlay.Top = _currentOverlayY;
             }
 
-            // Feature 1: Promote held button to visible LMB/RMB/MMB badge after 220ms
+            // Promote held button to visible LMB/RMB/MMB badge after 220ms
             if (_heldMouseButton != null && !_holdBadgeShown && (DateTime.UtcNow - _mouseDownTime).TotalMilliseconds >= 220)
             {
                 _holdBadgeShown = true;
@@ -469,7 +1285,7 @@ namespace Tagsor
                 _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
             }
 
-            bool isIdle = !_isSpotlightActive && _heldMouseButton == null && (DateTime.UtcNow - _lastActivityTime).TotalSeconds > 2.5;
+            bool isIdle = !_isSpotlightActive && !_isMarkerActive && _heldMouseButton == null && (DateTime.UtcNow - _lastActivityTime).TotalSeconds > 2.5;
             _overlay.SetIdleState(isIdle);
 
             if (++_topmostTickCounter >= 15)
@@ -507,11 +1323,13 @@ namespace Tagsor
                 using var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize");
                 if (key?.GetValue("AppsUseLightTheme") is int useLight)
                 {
-                    _overlay.ApplyTheme(useLight == 1);
+                    _isLightTheme = (useLight == 1);
+                    _overlay.ApplyTheme(_isLightTheme);
                 }
             }
             catch
             {
+                _isLightTheme = false;
                 _overlay.ApplyTheme(false);
             }
         }
@@ -545,6 +1363,10 @@ namespace Tagsor
                         if (!_isOverlayPaused) ToggleSpotlight();
                         handled = true;
                         break;
+                    case HOTKEY_MARKER_ID:
+                        if (!_isOverlayPaused) ToggleMarkerMode();
+                        handled = true;
+                        break;
                     case HOTKEY_STATUS_1_ID:
                         if (!_isOverlayPaused) TriggerStatusChip("👀 Look here", "#38BDF8");
                         handled = true;
@@ -574,9 +1396,13 @@ namespace Tagsor
             {
                 int vk = keyboardData.Keyboard.VirutalKey;
 
-                // Pressing Escape dismisses an active status chip or spotlight immediately
+                // Pressing Escape dismisses Draw Mode, Spotlight, or Status Chips immediately
                 if (!keyboardData.Keyboard.Flags.HasFlag(RawKeyboardFlags.Up) && vk == 0x1B)
                 {
+                    if (_isMarkerActive)
+                    {
+                        ToggleMarkerMode();
+                    }
                     if (!string.IsNullOrEmpty(_activeStatusText))
                     {
                         _activeStatusText = null;
@@ -601,7 +1427,6 @@ namespace Tagsor
                         _lastKeyTime = DateTime.UtcNow;
                         _isShowingKeys = true;
 
-                        // Feature 4: Stack consecutive identical keystrokes (e.g., Ctrl+Z ×3 or Backspace ×4)
                         if (_typedKeys.Count > 0 && _typedKeys[^1].KeyId == keyItem.KeyId)
                         {
                             _typedKeys[^1].RepeatCount++;
@@ -628,7 +1453,7 @@ namespace Tagsor
                 int dx = mouseData.Mouse.LastX;
                 _overlay.SetTiltFromVelocity(dx);
 
-                // Feature 5: Detect rapid horizontal shake-to-locate
+                // Detect rapid horizontal shake-to-locate
                 if (Math.Abs(dx) >= 18)
                 {
                     int dir = Math.Sign(dx);
@@ -651,7 +1476,7 @@ namespace Tagsor
                     }
                 }
 
-                // Feature 1: Click Ripple, Double-Click Detection & Drag-Hold Tracking
+                // Double-Click Detection & Drag-Hold Tracking
                 var buttons = mouseData.Mouse.Buttons;
                 if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonDown))
                 {
@@ -699,6 +1524,7 @@ namespace Tagsor
                     if (_activeProfile.Name != savedProfile.Name || _activeProfile.AccentHex != savedProfile.AccentHex)
                     {
                         _activeProfile = savedProfile;
+                        _markerColorHex = savedProfile.AccentHex;
                         if (!_isShowingKeys && string.IsNullOrEmpty(_activeStatusText))
                         {
                             _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex);
@@ -710,6 +1536,7 @@ namespace Tagsor
                     if (_savedMice.Count == 0)
                     {
                         _activeProfile = new MouseProfile { Name = "Zaki", AccentHex = "#60A5FA" };
+                        _markerColorHex = _activeProfile.AccentHex;
                         _savedMice[deviceId] = _activeProfile;
                         SaveMiceToDisk();
                         if (!_isShowingKeys && string.IsNullOrEmpty(_activeStatusText))
@@ -823,6 +1650,7 @@ namespace Tagsor
                     Name = dialog.EnteredName,
                     AccentHex = dialog.SelectedAccentHex
                 };
+                _markerColorHex = _activeProfile.AccentHex;
                 _savedMice[deviceId] = _activeProfile;
                 SaveMiceToDisk();
 
