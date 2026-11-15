@@ -13,8 +13,8 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/zakiuhh/tagsor/releases/download/v1.2.0/Tagsor.exe">
-    <img src="https://img.shields.io/badge/Download_for_Windows-Tagsor.exe_(v1.2.0)-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" />
+  <a href="https://github.com/zakiuhh/tagsor/releases/download/v1.3.0/Tagsor.exe">
+    <img src="https://img.shields.io/badge/Download_for_Windows-Tagsor.exe_(v1.3.0)-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" />
   </a>
 </p>
 
@@ -44,7 +44,7 @@ When you're sharing your screen on a call, recording a tutorial, or plugging two
 ## Quick Start
 
 ### Option 1: Download & Run (No Setup Needed)
-1. Directly download from [**here**](https://github.com/zakiuhh/tagsor/releases/download/v1.2.0/Tagsor.exe) or go to the [**Releases**](../../releases) page, scroll to the Assets section and download **`Tagsor.exe`**.
+1. Directly download from [**here**](https://github.com/zakiuhh/tagsor/releases/download/v1.3.0/Tagsor.exe) or go to the [**Releases**](../../releases) page, scroll to the Assets section and download **`Tagsor.exe`**.
 2. Double-click **`Tagsor.exe`**.
 3. A small **Tagsor** icon will appear in your Windows system tray (bottom-right near the clock), and your cursor tag will appear right away.
 

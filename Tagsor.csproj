@@ -11,7 +11,7 @@
     <AssemblyName>Tagsor</AssemblyName>
     <Product>Tagsor</Product>
     <Company>Zaki</Company>
-    <Version>1.2.0</Version>
+    <Version>1.3.0</Version>
   </PropertyGroup>
 
   <ItemGroup>

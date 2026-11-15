@@ -39,15 +39,6 @@ namespace Tagsor
         private const int HOTKEY_STATUS_3_ID = 9005;
         private const int HOTKEY_MARKER_ID = 9006;
 
-        private const uint MOD_ALT = 0x0001;
-        private const uint MOD_CONTROL = 0x0002;
-        private const uint VK_H = 0x48;
-        private const uint VK_S = 0x53;
-        private const uint VK_D = 0x44;
-        private const uint VK_1 = 0x31;
-        private const uint VK_2 = 0x32;
-        private const uint VK_3 = 0x33;
-
         private const int GWL_EXSTYLE = -20;
         private const int WS_EX_TRANSPARENT = 0x00000020;
         private const int WS_EX_NOACTIVATE = 0x08000000;
@@ -62,11 +53,16 @@ namespace Tagsor
         private const int VK_RWIN = 0x5C;
 
         private readonly string _saveFilePath;
+        private readonly string _settingsFilePath;
+        private AppSettings _settings = new();
+        private FileSystemWatcher? _settingsWatcher;
+
         private Dictionary<string, MouseProfile> _savedMice = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _promptingDevices = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _skippedDevices = new(StringComparer.OrdinalIgnoreCase);
         private CursorOverlay _overlay = null!;
         private string _activeDeviceId = "";
+        private string? _manualOverrideDeviceId = null;
         private MouseProfile _activeProfile = new();
 
         private DispatcherTimer _trackingTimer = null!;
@@ -107,7 +103,7 @@ namespace Tagsor
         private RadialGradientBrush? _spotlightBrush;
         private bool _isSpotlightActive = false;
 
-        // Live Screen Marker, Smooth Splines & Hold-to-Snap Shape State (Ctrl + Alt + D)
+        // Live Screen Marker, Smooth Splines & Hold-to-Snap Shape State
         private Window? _markerWindow;
         private Canvas? _markerCanvas;
         private System.Windows.Shapes.Path? _currentStrokePath;
@@ -179,7 +175,11 @@ namespace Tagsor
             string appDataFolder = IOPath.Combine(roamingAppData, "Tagsor");
             Directory.CreateDirectory(appDataFolder);
             _saveFilePath = IOPath.Combine(appDataFolder, "saved_mice.json");
+            _settingsFilePath = IOPath.Combine(appDataFolder, "settings.json");
             MigrateLegacySaveFile(IOPath.Combine(roamingAppData, "DualCursorApp"));
+
+            _settings = AppSettings.LoadOrCreate(_settingsFilePath);
+            StartSettingsWatcher(appDataFolder);
 
             LoadSavedMice();
             _markerColorHex = _activeProfile.AccentHex;
@@ -208,6 +208,7 @@ namespace Tagsor
             this.Closed += (s, e) =>
             {
                 SaveMiceToDisk();
+                _settingsWatcher?.Dispose();
                 _trackingTimer.Stop();
                 _shapeHoldTimer?.Stop();
                 SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
@@ -216,18 +217,156 @@ namespace Tagsor
                     Application.Current.SessionEnding -= OnSessionEnding;
                 }
                 var hwnd = new WindowInteropHelper(_overlay).Handle;
-                UnregisterHotKey(hwnd, HOTKEY_PRIVACY_ID);
-                UnregisterHotKey(hwnd, HOTKEY_SPOTLIGHT_ID);
-                UnregisterHotKey(hwnd, HOTKEY_STATUS_1_ID);
-                UnregisterHotKey(hwnd, HOTKEY_STATUS_2_ID);
-                UnregisterHotKey(hwnd, HOTKEY_STATUS_3_ID);
-                UnregisterHotKey(hwnd, HOTKEY_MARKER_ID);
+                UnregisterConfiguredHotkeys(hwnd);
                 _spotlightWindow?.Close();
                 _markerWindow?.Close();
                 _trayIcon.Visible = false;
                 _trayIcon.Dispose();
                 _overlay.Close();
             };
+        }
+
+        private void StartSettingsWatcher(string folder)
+        {
+            try
+            {
+                _settingsWatcher = new FileSystemWatcher(folder, "settings.json")
+                {
+                    NotifyFilter = NotifyFilters.LastWrite | NotifyFilters.CreationTime | NotifyFilters.Size
+                };
+                _settingsWatcher.Changed += (s, e) =>
+                {
+                    Dispatcher.BeginInvoke(() =>
+                    {
+                        _settings = AppSettings.LoadOrCreate(_settingsFilePath);
+                        if (_overlay != null)
+                        {
+                            var hwnd = new WindowInteropHelper(_overlay).Handle;
+                            if (hwnd != IntPtr.Zero)
+                            {
+                                RegisterConfiguredHotkeys(hwnd);
+                            }
+                        }
+                    });
+                };
+                _settingsWatcher.EnableRaisingEvents = true;
+            }
+            catch { }
+        }
+
+        private void RegisterConfiguredHotkeys(IntPtr hwnd)
+        {
+            UnregisterConfiguredHotkeys(hwnd);
+
+            RegisterSingleHotkey(hwnd, HOTKEY_PRIVACY_ID, _settings.PrivacyHotkey, 0x0002 | 0x0001, 0x48);
+            RegisterSingleHotkey(hwnd, HOTKEY_SPOTLIGHT_ID, _settings.SpotlightHotkey, 0x0002 | 0x0001, 0x53);
+            RegisterSingleHotkey(hwnd, HOTKEY_MARKER_ID, _settings.MarkerHotkey, 0x0002 | 0x0001, 0x44);
+            RegisterSingleHotkey(hwnd, HOTKEY_STATUS_1_ID, _settings.Status1Hotkey, 0x0002 | 0x0001, 0x31);
+            RegisterSingleHotkey(hwnd, HOTKEY_STATUS_2_ID, _settings.Status2Hotkey, 0x0002 | 0x0001, 0x32);
+            RegisterSingleHotkey(hwnd, HOTKEY_STATUS_3_ID, _settings.Status3Hotkey, 0x0002 | 0x0001, 0x33);
+        }
+
+        private static void RegisterSingleHotkey(IntPtr hwnd, int id, string shortcutText, uint fallbackMod, uint fallbackVk)
+        {
+            if (AppSettings.TryParseHotkey(shortcutText, out uint mod, out uint vk))
+            {
+                RegisterHotKey(hwnd, id, mod, vk);
+            }
+            else
+            {
+                RegisterHotKey(hwnd, id, fallbackMod, fallbackVk);
+            }
+        }
+
+        private static void UnregisterConfiguredHotkeys(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            UnregisterHotKey(hwnd, HOTKEY_PRIVACY_ID);
+            UnregisterHotKey(hwnd, HOTKEY_SPOTLIGHT_ID);
+            UnregisterHotKey(hwnd, HOTKEY_STATUS_1_ID);
+            UnregisterHotKey(hwnd, HOTKEY_STATUS_2_ID);
+            UnregisterHotKey(hwnd, HOTKEY_STATUS_3_ID);
+            UnregisterHotKey(hwnd, HOTKEY_MARKER_ID);
+        }
+
+        private static bool IsStartupEnabled()
+        {
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", false);
+                return key?.GetValue(AppName) != null;
+            }
+            catch { return false; }
+        }
+
+        private static void SetStartupEnabled(bool enable)
+        {
+            try
+            {
+                using var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
+                if (key == null) return;
+
+                if (enable)
+                {
+                    string? exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
+                    if (!string.IsNullOrEmpty(exePath) && !exePath.EndsWith("dotnet.exe", StringComparison.OrdinalIgnoreCase))
+                    {
+                        key.DeleteValue("DualCursorTag", false);
+                        key.SetValue(AppName, $"\"{exePath}\"");
+                    }
+                }
+                else
+                {
+                    key.DeleteValue(AppName, false);
+                }
+            }
+            catch { }
+        }
+
+        private void OpenSettingsWindow()
+        {
+            string appDataFolder = IOPath.GetDirectoryName(_settingsFilePath)!;
+            var win = new SettingsWindow(_settings, _savedMice, _activeDeviceId, IsStartupEnabled(), appDataFolder);
+
+            if (win.ShowDialog() == true)
+            {
+                _settings = win.UpdatedSettings;
+                _settings.Save(_settingsFilePath);
+
+                _savedMice = win.WorkingMice;
+                SaveMiceToDisk();
+                SetStartupEnabled(win.LaunchOnStartup);
+
+                if (!string.IsNullOrEmpty(win.ActiveDeviceId) && _savedMice.TryGetValue(win.ActiveDeviceId, out var selected))
+                {
+                    _manualOverrideDeviceId = win.ActiveDeviceId;
+                    _activeDeviceId = win.ActiveDeviceId;
+                    _activeProfile = selected;
+                }
+                else if (_savedMice.Count > 0)
+                {
+                    var last = _savedMice.Last();
+                    _manualOverrideDeviceId = null;
+                    _activeDeviceId = last.Key;
+                    _activeProfile = last.Value;
+                }
+                else
+                {
+                    _manualOverrideDeviceId = null;
+                    _activeDeviceId = "";
+                    _activeProfile = new MouseProfile();
+                }
+
+                _markerColorHex = _activeProfile.AccentHex;
+                _activeStatusText = null;
+                _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
+
+                var hwnd = new WindowInteropHelper(_overlay).Handle;
+                if (hwnd != IntPtr.Zero)
+                {
+                    RegisterConfiguredHotkeys(hwnd);
+                }
+            }
         }
 
         private void OnSessionEnding(object sender, SessionEndingCancelEventArgs e)
@@ -302,11 +441,16 @@ namespace Tagsor
             _activeTrayMenu = new TrayMenuPopup(
                 _activeProfile.Name,
                 _activeProfile.AccentHex,
+                _activeDeviceId,
+                _savedMice,
+                _settings,
                 _isPrivacyMode,
                 _isOverlayPaused,
                 _isSpotlightActive,
                 _isMarkerActive);
 
+            _activeTrayMenu.OnSwitchMouseRequested += SwitchActiveMouse;
+            _activeTrayMenu.OnDeleteMouseRequested += DeleteSavedMouse;
             _activeTrayMenu.OnEditMouseRequested += EditActiveMouse;
             _activeTrayMenu.OnResetMiceRequested += ResetSavedMice;
             _activeTrayMenu.OnToggleSpotlightRequested += () => { if (!_isOverlayPaused) ToggleSpotlight(); };
@@ -314,6 +458,7 @@ namespace Tagsor
             _activeTrayMenu.OnStatusChipRequested += (label, hex) => { if (!_isOverlayPaused) TriggerStatusChip(label, hex); };
             _activeTrayMenu.OnTogglePrivacyRequested += TogglePrivacyMode;
             _activeTrayMenu.OnTogglePauseRequested += TogglePauseOverlay;
+            _activeTrayMenu.OnOpenSettingsRequested += OpenSettingsWindow;
             _activeTrayMenu.OnExitRequested += Close;
 
             if (GetCursorPos(out POINT pt))
@@ -326,9 +471,53 @@ namespace Tagsor
             _activeTrayMenu.Activate();
         }
 
+        private void SwitchActiveMouse(string deviceId)
+        {
+            if (!_savedMice.TryGetValue(deviceId, out var profile)) return;
+
+            _manualOverrideDeviceId = deviceId;
+            _activeDeviceId = deviceId;
+            _activeProfile = profile;
+            _markerColorHex = profile.AccentHex;
+            _activeStatusText = null;
+            _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
+        }
+
+        private void DeleteSavedMouse(string deviceId)
+        {
+            if (!_savedMice.Remove(deviceId)) return;
+
+            SaveMiceToDisk();
+            _skippedDevices.Remove(deviceId);
+
+            if (string.Equals(_manualOverrideDeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+            {
+                _manualOverrideDeviceId = null;
+            }
+
+            if (string.Equals(_activeDeviceId, deviceId, StringComparison.OrdinalIgnoreCase))
+            {
+                if (_savedMice.Count > 0)
+                {
+                    var fallback = _savedMice.Last();
+                    _activeDeviceId = fallback.Key;
+                    _activeProfile = fallback.Value;
+                }
+                else
+                {
+                    _activeDeviceId = "";
+                    _activeProfile = new MouseProfile();
+                }
+
+                _markerColorHex = _activeProfile.AccentHex;
+                _activeStatusText = null;
+                _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
+            }
+        }
+
         private void EditActiveMouse()
         {
-            var dialog = new NamePromptDialog("Rename mouse", _activeProfile.Name);
+            var dialog = new NamePromptDialog("Rename mouse", _activeProfile.Name, initialAccentHex: _activeProfile.AccentHex);
             if (dialog.ShowDialog() == true)
             {
                 _activeProfile = new MouseProfile
@@ -352,6 +541,7 @@ namespace Tagsor
             _savedMice.Clear();
             SaveMiceToDisk();
             _skippedDevices.Clear();
+            _manualOverrideDeviceId = null;
             _activeDeviceId = "";
             _activeStatusText = null;
             _activeProfile = new MouseProfile();
@@ -389,7 +579,7 @@ namespace Tagsor
             }
         }
 
-        // Spotlight Dimmer Toggle (Ctrl + Alt + S)
+        // Spotlight Dimmer Toggle
         private void ToggleSpotlight()
         {
             _isSpotlightActive = !_isSpotlightActive;
@@ -444,7 +634,7 @@ namespace Tagsor
             }
         }
 
-        // Live Screen Marker + Smooth Catmull-Rom Splines + Hold-to-Snap Shape Recognition (Ctrl + Alt + D)
+        // Live Screen Marker + Smooth Catmull-Rom Splines + Hold-to-Snap Shape Recognition
         private void ToggleMarkerMode()
         {
             _isMarkerActive = !_isMarkerActive;
@@ -1202,7 +1392,7 @@ namespace Tagsor
             return template;
         }
 
-        // Quick-Switch Status Chip (Ctrl + Alt + 1 / 2 / 3)
+        // Quick-Switch Status Chip
         private void TriggerStatusChip(string statusLabel, string hexColor)
         {
             if (_activeStatusText == statusLabel)
@@ -1246,12 +1436,7 @@ namespace Tagsor
             var source = HwndSource.FromHwnd(hwnd);
             source?.AddHook(WndProc);
 
-            RegisterHotKey(hwnd, HOTKEY_PRIVACY_ID, MOD_CONTROL | MOD_ALT, VK_H);
-            RegisterHotKey(hwnd, HOTKEY_SPOTLIGHT_ID, MOD_CONTROL | MOD_ALT, VK_S);
-            RegisterHotKey(hwnd, HOTKEY_STATUS_1_ID, MOD_CONTROL | MOD_ALT, VK_1);
-            RegisterHotKey(hwnd, HOTKEY_STATUS_2_ID, MOD_CONTROL | MOD_ALT, VK_2);
-            RegisterHotKey(hwnd, HOTKEY_STATUS_3_ID, MOD_CONTROL | MOD_ALT, VK_3);
-            RegisterHotKey(hwnd, HOTKEY_MARKER_ID, MOD_CONTROL | MOD_ALT, VK_D);
+            RegisterConfiguredHotkeys(hwnd);
 
             RawInputDevice.RegisterDevice(HidUsageAndPage.Mouse, RawInputDeviceFlags.InputSink, hwnd);
             RawInputDevice.RegisterDevice(HidUsageAndPage.Keyboard, RawInputDeviceFlags.InputSink, hwnd);
@@ -1319,7 +1504,7 @@ namespace Tagsor
                 _overlay.SetHoldIndicator(_heldMouseButton);
             }
 
-            if (_isShowingKeys && (DateTime.UtcNow - _lastKeyTime).TotalSeconds >= 1.1)
+            if (_isShowingKeys && (DateTime.UtcNow - _lastKeyTime).TotalSeconds >= _settings.KeystrokeDisplaySeconds)
             {
                 _isShowingKeys = false;
                 _typedKeys.Clear();
@@ -1333,7 +1518,7 @@ namespace Tagsor
                 _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
             }
 
-            bool isIdle = !_isSpotlightActive && !_isMarkerActive && _heldMouseButton == null && (DateTime.UtcNow - _lastActivityTime).TotalSeconds > 2.5;
+            bool isIdle = !_isSpotlightActive && !_isMarkerActive && _heldMouseButton == null && (DateTime.UtcNow - _lastActivityTime).TotalSeconds > _settings.IdleFadeSeconds;
             _overlay.SetIdleState(isIdle);
 
             if (++_topmostTickCounter >= 15)
@@ -1384,17 +1569,7 @@ namespace Tagsor
 
         private void RegisterWindowsStartup()
         {
-            try
-            {
-                string? exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
-                if (!string.IsNullOrEmpty(exePath) && !exePath.EndsWith("dotnet.exe", StringComparison.OrdinalIgnoreCase))
-                {
-                    using var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
-                    key?.DeleteValue("DualCursorTag", false);
-                    key?.SetValue(AppName, $"\"{exePath}\"");
-                }
-            }
-            catch { }
+            SetStartupEnabled(true);
         }
 
         private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
@@ -1491,9 +1666,8 @@ namespace Tagsor
                         _lastKeyTime = DateTime.UtcNow;
                         _isShowingKeys = true;
 
-                        // Replace a preceding standalone Shift icon when a shifted symbol/letter resolves (e.g., Shift + , -> <)
                         if (consumedShift && _hasPendingStandaloneShift && _typedKeys.Count > 0 && _typedKeys[^1].KeyId == "Shift"
-                            && (DateTime.UtcNow - _pendingShiftTime).TotalSeconds < 1.1)
+                            && (DateTime.UtcNow - _pendingShiftTime).TotalSeconds < _settings.KeystrokeDisplaySeconds)
                         {
                             _typedKeys.RemoveAt(_typedKeys.Count - 1);
                         }
@@ -1569,10 +1743,24 @@ namespace Tagsor
                 try { sourceDevice = mouseData.Device; } catch { }
                 if (sourceDevice == null) return;
 
-                string deviceId = NormalizeDeviceKey(sourceDevice.DevicePath, mouseData.Header.DeviceHandle.ToString());
-                _activeDeviceId = deviceId;
+                string physicalDeviceId = NormalizeDeviceKey(sourceDevice.DevicePath, mouseData.Header.DeviceHandle.ToString());
 
-                if (_savedMice.TryGetValue(deviceId, out MouseProfile? savedProfile))
+                // Respect manual profile switch until a different physical mouse moves
+                if (!string.IsNullOrEmpty(_manualOverrideDeviceId) && _savedMice.ContainsKey(_manualOverrideDeviceId))
+                {
+                    if (!string.Equals(physicalDeviceId, _activeDeviceId, StringComparison.OrdinalIgnoreCase) && _savedMice.ContainsKey(physicalDeviceId))
+                    {
+                        _manualOverrideDeviceId = null;
+                    }
+                    else
+                    {
+                        return;
+                    }
+                }
+
+                _activeDeviceId = physicalDeviceId;
+
+                if (_savedMice.TryGetValue(physicalDeviceId, out MouseProfile? savedProfile))
                 {
                     if (_activeProfile.Name != savedProfile.Name || _activeProfile.AccentHex != savedProfile.AccentHex)
                     {
@@ -1584,11 +1772,11 @@ namespace Tagsor
                         }
                     }
                 }
-                else if (!_promptingDevices.Contains(deviceId) && !_skippedDevices.Contains(deviceId))
+                else if (!_promptingDevices.Contains(physicalDeviceId) && !_skippedDevices.Contains(physicalDeviceId))
                 {
                     bool isFirstRun = _savedMice.Count == 0;
-                    _promptingDevices.Add(deviceId);
-                    Dispatcher.BeginInvoke(() => PromptForNewMouseName(deviceId, isFirstRun));
+                    _promptingDevices.Add(physicalDeviceId);
+                    Dispatcher.BeginInvoke(() => PromptForNewMouseName(physicalDeviceId, isFirstRun));
                 }
             }
         }

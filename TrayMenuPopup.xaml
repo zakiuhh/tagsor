@@ -113,7 +113,7 @@
 
     <Grid Margin="14">
         <Border x:Name="MenuRoot"
-                MinWidth="236"
+                MinWidth="246"
                 Background="{DynamicResource MenuBgBrush}"
                 BorderBrush="{DynamicResource MenuBorderBrush}"
                 BorderThickness="1"
@@ -148,6 +148,10 @@
 
                 <Border Height="1" Background="{DynamicResource DividerBrush}" Margin="6,0,6,4"/>
 
+                <!-- Multi-Mouse Quick Switcher List -->
+                <StackPanel x:Name="SavedMicePanel" Visibility="Collapsed"/>
+                <Border x:Name="SavedMiceDivider" Height="1" Background="{DynamicResource DividerBrush}" Margin="6,3,6,4" Visibility="Collapsed"/>
+
                 <!-- Mouse Profiles -->
                 <Button Style="{StaticResource MenuActionItem}" Click="EditMouse_Click">
                     <TextBlock Text="Rename mouse..." FontSize="12.5"/>
@@ -164,7 +168,7 @@
                     <Grid>
                         <TextBlock Text="Spotlight focus" FontSize="12.5" VerticalAlignment="Center"/>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                            <TextBlock Text="Ctrl+Alt+S" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="14,0,6,0"/>
+                            <TextBlock x:Name="SpotlightShortcutLabel" Text="Ctrl+Alt+S" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="14,0,6,0"/>
                             <TextBlock x:Name="SpotlightCheck" Text="✓" Foreground="#60A5FA" FontWeight="Bold" FontSize="12" Visibility="Collapsed"/>
                         </StackPanel>
                     </Grid>
@@ -174,7 +178,7 @@
                     <Grid>
                         <TextBlock Text="Screen marker" FontSize="12.5" VerticalAlignment="Center"/>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                            <TextBlock Text="Ctrl+Alt+D" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="14,0,6,0"/>
+                            <TextBlock x:Name="MarkerShortcutLabel" Text="Ctrl+Alt+D" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="14,0,6,0"/>
                             <TextBlock x:Name="MarkerCheck" Text="✓" Foreground="#60A5FA" FontWeight="Bold" FontSize="12" Visibility="Collapsed"/>
                         </StackPanel>
                     </Grid>
@@ -188,13 +192,13 @@
                         <ColumnDefinition Width="*"/>
                     </Grid.ColumnDefinitions>
 
-                    <Button Grid.Column="0" Style="{StaticResource ChipActionItem}" Click="Chip1_Click" ToolTip="Ctrl+Alt+1">
+                    <Button x:Name="Chip1Btn" Grid.Column="0" Style="{StaticResource ChipActionItem}" Click="Chip1_Click" ToolTip="Ctrl+Alt+1">
                         <TextBlock Text="👀 Look" FontSize="11.5"/>
                     </Button>
-                    <Button Grid.Column="1" Style="{StaticResource ChipActionItem}" Click="Chip2_Click" ToolTip="Ctrl+Alt+2">
+                    <Button x:Name="Chip2Btn" Grid.Column="1" Style="{StaticResource ChipActionItem}" Click="Chip2_Click" ToolTip="Ctrl+Alt+2">
                         <TextBlock Text="⏸ Hold" FontSize="11.5"/>
                     </Button>
-                    <Button Grid.Column="2" Style="{StaticResource ChipActionItem}" Click="Chip3_Click" ToolTip="Ctrl+Alt+3">
+                    <Button x:Name="Chip3Btn" Grid.Column="2" Style="{StaticResource ChipActionItem}" Click="Chip3_Click" ToolTip="Ctrl+Alt+3">
                         <TextBlock Text="✅ Done" FontSize="11.5"/>
                     </Button>
                 </Grid>
@@ -206,7 +210,7 @@
                     <Grid>
                         <TextBlock Text="Hide keystrokes" FontSize="12.5" VerticalAlignment="Center"/>
                         <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center">
-                            <TextBlock Text="Ctrl+Alt+H" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="14,0,6,0"/>
+                            <TextBlock x:Name="PrivacyShortcutLabel" Text="Ctrl+Alt+H" Foreground="{DynamicResource MutedTextBrush}" FontSize="11" Margin="14,0,6,0"/>
                             <TextBlock x:Name="PrivacyCheck" Text="✓" Foreground="#60A5FA" FontWeight="Bold" FontSize="12" Visibility="Collapsed"/>
                         </StackPanel>
                     </Grid>
@@ -216,6 +220,12 @@
                     <Grid>
                         <TextBlock Text="Pause tag" FontSize="12.5" VerticalAlignment="Center"/>
                         <TextBlock x:Name="PauseCheck" Text="✓" HorizontalAlignment="Right" VerticalAlignment="Center" Foreground="#FBBF24" FontWeight="Bold" FontSize="12" Visibility="Collapsed"/>
+                    </Grid>
+                </Button>
+
+                <Button Style="{StaticResource MenuActionItem}" Click="OpenSettings_Click">
+                    <Grid>
+                        <TextBlock Text="Settings &amp; profiles..." FontSize="12.5" VerticalAlignment="Center"/>
                     </Grid>
                 </Button>
 
