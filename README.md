@@ -9,12 +9,12 @@
 </p>
 
 <p align="center">
-  Built for screen recordings, live demos, pair programming, and shared setups—so viewers always know whose cursor is moving, what keys are being pressed, and where to look.
+  Built for screen recordings, live demos, pair programming, and shared setups - so viewers always know whose cursor is moving, what keys are being pressed, and where to look.
 </p>
 
 <p align="center">
   <a href="https://github.com/zakiuhh/tagsor/releases/download/v1.2.0/Tagsor.exe">
-    <img src="https://img.shields.io/badge/Download_for_Windows-Tagsor.exe_(v1.1.0)-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" />
+    <img src="https://img.shields.io/badge/Download_for_Windows-Tagsor.exe_(v1.2.0)-0078D4?style=for-the-badge&logo=windows&logoColor=white" alt="Download for Windows" />
   </a>
 </p>
 
