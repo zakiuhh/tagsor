@@ -29,6 +29,12 @@ namespace Tagsor
         private string _accentHex = "#60A5FA";
         private Brush _currentForeground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#EFEFEF"));
 
+        // Liquid Morph Physics State
+        private double _currentMorphWidth = 0;
+        private double _currentMorphHeight = 0;
+        private bool _morphInitialized = false;
+        private const double MorphSpeed = 0.28; // Smooth spring-like interpolation per frame
+
         [DllImport("user32.dll")]
         private static extern int GetWindowLong(IntPtr hwnd, int index);
 
@@ -42,6 +48,59 @@ namespace Tagsor
         {
             InitializeComponent();
             UserNameLabel.Text = userName;
+            CompositionTarget.Rendering += OnRenderMorphFrame;
+            Closed += (_, _) => CompositionTarget.Rendering -= OnRenderMorphFrame;
+        }
+
+        // 120Hz Liquid Shape Morphing Loop
+        private void OnRenderMorphFrame(object? sender, EventArgs e)
+        {
+            PillContentGrid.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            double targetW = Math.Max(28, PillContentGrid.DesiredSize.Width + 3.0);
+            double targetH = Math.Max(24, PillContentGrid.DesiredSize.Height + 3.0);
+
+            if (!_morphInitialized)
+            {
+                _currentMorphWidth = targetW;
+                _currentMorphHeight = targetH;
+                _morphInitialized = true;
+            }
+            else
+            {
+                double diffW = targetW - _currentMorphWidth;
+                double diffH = targetH - _currentMorphHeight;
+
+                _currentMorphWidth = Math.Abs(diffW) < 0.15 ? targetW : _currentMorphWidth + diffW * MorphSpeed;
+                _currentMorphHeight = Math.Abs(diffH) < 0.15 ? targetH : _currentMorphHeight + diffH * MorphSpeed;
+            }
+
+            PillBorder.Width = _currentMorphWidth;
+            PillBorder.Height = _currentMorphHeight;
+
+            // Dynamic corner radius: rounder pill when compact, smooth rounded rect when wide
+            double ratio = Math.Clamp((_currentMorphWidth - _currentMorphHeight) / 90.0, 0.0, 1.0);
+            double dynamicRadius = (_currentMorphHeight * 0.46) * (1.0 - ratio * 0.28);
+            double clampedRadius = Math.Clamp(dynamicRadius, 9.0, 14.0);
+
+            PillBorder.CornerRadius = new CornerRadius(clampedRadius);
+            PillInnerBackground.CornerRadius = new CornerRadius(Math.Max(0, clampedRadius - 1.5));
+        }
+
+        private void TriggerContentMorphPulse()
+        {
+            PillContentGrid.BeginAnimation(OpacityProperty, null);
+            var fadeIn = new DoubleAnimation(0.55, 1.0, TimeSpan.FromMilliseconds(140))
+            {
+                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
+            };
+            PillContentGrid.BeginAnimation(OpacityProperty, fadeIn);
+
+            var scalePop = new DoubleAnimation(0.95, 1.0, TimeSpan.FromMilliseconds(170))
+            {
+                EasingFunction = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.35 }
+            };
+            ContentScale.BeginAnimation(ScaleTransform.ScaleXProperty, scalePop);
+            ContentScale.BeginAnimation(ScaleTransform.ScaleYProperty, scalePop);
         }
 
         protected override void OnSourceInitialized(EventArgs e)
@@ -72,9 +131,15 @@ namespace Tagsor
         {
             try
             {
-                var accentColor = (Color)ColorConverter.ConvertFromString(_accentHex);
-                accentColor.A = _isLightTheme ? (byte)150 : (byte)130;
-                PillBorder.BorderBrush = new SolidColorBrush(accentColor);
+                var accent = (Color)ColorConverter.ConvertFromString(_accentHex);
+                var baseBg = (Color)ColorConverter.ConvertFromString(_isLightTheme ? "#F7F7F9" : "#2B2B30");
+                double alpha = _isLightTheme ? 0.65 : 0.60;
+
+                byte r = (byte)(accent.R * alpha + baseBg.R * (1 - alpha));
+                byte g = (byte)(accent.G * alpha + baseBg.G * (1 - alpha));
+                byte b = (byte)(accent.B * alpha + baseBg.B * (1 - alpha));
+
+                PillBorder.BorderBrush = new SolidColorBrush(Color.FromRgb(r, g, b));
             }
             catch
             {
@@ -84,38 +149,37 @@ namespace Tagsor
 
         // 1A. Click Ripple + Double-Click Pulse
         public void TriggerClickAnimation(bool isPressed, string buttonType = "LMB", bool isDoubleClick = false)
+        {
+            if (isPressed)
+            {
+                string activeHex = buttonType switch
                 {
-                    if (isPressed)
-                    {
-                        string activeHex = buttonType switch
-                        {
-                            "RMB" => "#F59E0B",
-                            "MMB" => "#F472B6",
-                            _ => _accentHex
-                        };
+                    "RMB" => "#F59E0B",
+                    "MMB" => "#F472B6",
+                    _ => _accentHex
+                };
 
-                        PillBorder.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(activeHex));
+                PillBorder.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(activeHex));
 
-                        // Pill press compression (or double-click pop)
-                        double targetScale = isDoubleClick ? 1.16 : (buttonType == "MMB" ? 0.85 : 0.91);
-                        var ease = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.45 };
-                        var scaleAnim = new DoubleAnimation(targetScale, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease };
-                        PillScale.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
-                        PillScale.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
-                    }
-                    else
-                    {
-                        SetHoldIndicator(null);
-                        if (!_isShakeSurging)
-                        {
-                            var ease = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.45 };
-                            var scaleAnim = new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease };
-                            PillScale.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
-                            PillScale.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
-                        }
-                        ApplyRestBorder();
-                    }
+                double targetScale = isDoubleClick ? 1.16 : (buttonType == "MMB" ? 0.85 : 0.91);
+                var ease = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.45 };
+                var scaleAnim = new DoubleAnimation(targetScale, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease };
+                PillScale.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
+                PillScale.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
+            }
+            else
+            {
+                SetHoldIndicator(null);
+                if (!_isShakeSurging)
+                {
+                    var ease = new BackEase { EasingMode = EasingMode.EaseOut, Amplitude = 0.45 };
+                    var scaleAnim = new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(140)) { EasingFunction = ease };
+                    PillScale.BeginAnimation(ScaleTransform.ScaleXProperty, scaleAnim);
+                    PillScale.BeginAnimation(ScaleTransform.ScaleYProperty, scaleAnim);
                 }
+                ApplyRestBorder();
+            }
+        }
 
         // 1B. Drag-Hold Badge (LMB / RMB / MMB)
         public void SetHoldIndicator(string? buttonLabel)
@@ -136,6 +200,7 @@ namespace Tagsor
             HoldBadgeText.Text = buttonLabel;
             HoldBadge.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString(badgeHex));
             HoldBadge.Visibility = Visibility.Visible;
+            TriggerContentMorphPulse();
         }
 
         // 5. Shake-to-Locate Surge
@@ -186,6 +251,7 @@ namespace Tagsor
         // 4. Keystrokes + Repeat Counter (×2, ×3)
         public void ShowTypedKeys(List<KeyDisplayItem> keys)
         {
+            bool wasNameVisible = UserNameLabel.Visibility == Visibility.Visible;
             UserNameLabel.Visibility = Visibility.Collapsed;
             KeysPanel.Visibility = Visibility.Visible;
             KeysPanel.Children.Clear();
@@ -231,7 +297,6 @@ namespace Tagsor
                     });
                 }
 
-                // Repeat badge (e.g., ×3)
                 if (item.RepeatCount > 1)
                 {
                     var repeatScale = new ScaleTransform(1, 1);
@@ -275,6 +340,11 @@ namespace Tagsor
                     });
                 }
             }
+
+            if (wasNameVisible)
+            {
+                TriggerContentMorphPulse();
+            }
         }
 
         // 3. Status Chip / User Name Display
@@ -284,8 +354,9 @@ namespace Tagsor
             UserNameLabel.Visibility = Visibility.Visible;
             UserNameLabel.Text = statusText;
             PillBorder.BorderBrush = new SolidColorBrush((Color)ColorConverter.ConvertFromString(accentHex));
+            TriggerContentMorphPulse();
 
-            var popAnim = new DoubleAnimation(1.14, 1.0, TimeSpan.FromMilliseconds(220))
+            var popAnim = new DoubleAnimation(1.12, 1.0, TimeSpan.FromMilliseconds(220))
             {
                 EasingFunction = new ElasticEase { EasingMode = EasingMode.EaseOut, Oscillations = 1, Springiness = 5 }
             };
@@ -304,10 +375,11 @@ namespace Tagsor
             KeysPanel.Visibility = Visibility.Collapsed;
             UserNameLabel.Visibility = Visibility.Visible;
             UserNameLabel.Text = newName;
+            TriggerContentMorphPulse();
 
             if (!_isShakeSurging)
             {
-                var popAnim = new DoubleAnimation(1.12, 1.0, TimeSpan.FromMilliseconds(220))
+                var popAnim = new DoubleAnimation(1.1, 1.0, TimeSpan.FromMilliseconds(220))
                 {
                     EasingFunction = new ElasticEase { EasingMode = EasingMode.EaseOut, Oscillations = 1, Springiness = 5 }
                 };
@@ -345,15 +417,13 @@ namespace Tagsor
             _isLightTheme = isLightTheme;
             if (isLightTheme)
             {
-                PillBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#F7F7F9"));
+                PillInnerBackground.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#F7F7F9"));
                 _currentForeground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#1E1E22"));
-                PillShadow.Opacity = 0.22;
             }
             else
             {
-                PillBorder.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2B2B30"));
+                PillInnerBackground.Background = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#2B2B30"));
                 _currentForeground = new SolidColorBrush((Color)ColorConverter.ConvertFromString("#EFEFEF"));
-                PillShadow.Opacity = 0.45;
             }
             UserNameLabel.Foreground = _currentForeground;
             ApplyRestBorder();

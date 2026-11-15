@@ -5,7 +5,9 @@ using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -53,10 +55,16 @@ namespace Tagsor
         private const string AppName = "Tagsor";
         private const uint MAPVK_VK_TO_CHAR = 2;
 
+        private const int VK_SHIFT = 0x10;
+        private const int VK_CONTROL = 0x11;
+        private const int VK_MENU = 0x12;
+        private const int VK_LWIN = 0x5B;
+        private const int VK_RWIN = 0x5C;
+
         private readonly string _saveFilePath;
-        private Dictionary<string, MouseProfile> _savedMice = new();
-        private readonly HashSet<string> _promptingDevices = new();
-        private readonly HashSet<string> _skippedDevices = new();
+        private Dictionary<string, MouseProfile> _savedMice = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _promptingDevices = new(StringComparer.OrdinalIgnoreCase);
+        private readonly HashSet<string> _skippedDevices = new(StringComparer.OrdinalIgnoreCase);
         private CursorOverlay _overlay = null!;
         private string _activeDeviceId = "";
         private MouseProfile _activeProfile = new();
@@ -81,6 +89,8 @@ namespace Tagsor
         private readonly List<KeyDisplayItem> _typedKeys = new();
         private DateTime _lastKeyTime = DateTime.MinValue;
         private bool _isShowingKeys = false;
+        private bool _hasPendingStandaloneShift = false;
+        private DateTime _pendingShiftTime = DateTime.MinValue;
 
         // Drag-Hold & Double-Click State
         private string? _heldMouseButton = null;
@@ -132,6 +142,15 @@ namespace Tagsor
         private static extern short GetAsyncKeyState(int vKey);
 
         [DllImport("user32.dll")]
+        private static extern int ToUnicode(
+            uint wVirtKey,
+            uint wScanCode,
+            byte[] lpKeyState,
+            [Out, MarshalAs(UnmanagedType.LPWStr)] StringBuilder pwszBuff,
+            int cchBuff,
+            uint wFlags);
+
+        [DllImport("user32.dll")]
         private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
 
         [DllImport("user32.dll")]
@@ -174,6 +193,10 @@ namespace Tagsor
             SyncWithWindowsTheme();
 
             SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
+            if (Application.Current != null)
+            {
+                Application.Current.SessionEnding += OnSessionEnding;
+            }
 
             _trackingTimer = new DispatcherTimer(DispatcherPriority.Render)
             {
@@ -184,9 +207,14 @@ namespace Tagsor
 
             this.Closed += (s, e) =>
             {
+                SaveMiceToDisk();
                 _trackingTimer.Stop();
                 _shapeHoldTimer?.Stop();
                 SystemEvents.UserPreferenceChanged -= OnUserPreferenceChanged;
+                if (Application.Current != null)
+                {
+                    Application.Current.SessionEnding -= OnSessionEnding;
+                }
                 var hwnd = new WindowInteropHelper(_overlay).Handle;
                 UnregisterHotKey(hwnd, HOTKEY_PRIVACY_ID);
                 UnregisterHotKey(hwnd, HOTKEY_SPOTLIGHT_ID);
@@ -202,12 +230,43 @@ namespace Tagsor
             };
         }
 
+        private void OnSessionEnding(object sender, SessionEndingCancelEventArgs e)
+        {
+            SaveMiceToDisk();
+        }
+
+        private static string NormalizeDeviceKey(string? rawDevicePath, string? fallbackHandle = null)
+        {
+            if (!string.IsNullOrWhiteSpace(rawDevicePath))
+            {
+                var vidPidMatch = Regex.Match(rawDevicePath, @"(VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4})", RegexOptions.IgnoreCase);
+                if (vidPidMatch.Success)
+                {
+                    return vidPidMatch.Value.ToUpperInvariant();
+                }
+
+                string trimmed = rawDevicePath.Trim();
+                int firstHash = trimmed.IndexOf('#');
+                if (firstHash > 0)
+                {
+                    int secondHash = trimmed.IndexOf('#', firstHash + 1);
+                    if (secondHash > firstHash)
+                    {
+                        return trimmed.Substring(0, secondHash).ToUpperInvariant();
+                    }
+                }
+                return trimmed.ToUpperInvariant();
+            }
+
+            return $"HANDLE_{fallbackHandle}";
+        }
+
         private void SetupSystemTray()
         {
             System.Drawing.Icon trayIconGraphic = SystemIcons.Application;
             try
             {
-                string? exePath = Process.GetCurrentProcess().MainModule?.FileName;
+                string? exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
                 if (!string.IsNullOrEmpty(exePath))
                 {
                     trayIconGraphic = System.Drawing.Icon.ExtractAssociatedIcon(exePath) ?? SystemIcons.Application;
@@ -279,11 +338,9 @@ namespace Tagsor
                 };
                 _markerColorHex = _activeProfile.AccentHex;
 
-                if (!string.IsNullOrEmpty(_activeDeviceId))
-                {
-                    _savedMice[_activeDeviceId] = _activeProfile;
-                    SaveMiceToDisk();
-                }
+                string keyToSave = !string.IsNullOrEmpty(_activeDeviceId) ? _activeDeviceId : "DEFAULT_MOUSE";
+                _savedMice[keyToSave] = _activeProfile;
+                SaveMiceToDisk();
 
                 _activeStatusText = null;
                 _overlay.SetUserNameAnimated(_activeProfile.Name, _activeProfile.AccentHex, forceShowName: true);
@@ -310,6 +367,7 @@ namespace Tagsor
             {
                 _isShowingKeys = false;
                 _typedKeys.Clear();
+                _hasPendingStandaloneShift = false;
                 RestoreNameOrStatus();
             }
         }
@@ -541,7 +599,6 @@ namespace Tagsor
             }
         }
 
-        // --- Smooth Catmull-Rom to Cubic Bézier Spline Builder ---
         private static PathGeometry BuildSmoothSplineGeometry(IReadOnlyList<System.Windows.Point> points)
         {
             var geometry = new PathGeometry();
@@ -600,7 +657,6 @@ namespace Tagsor
             return geometry;
         }
 
-        // --- Hold-to-Snap Geometric Shape Recognizer ---
         private void TrySnapCurrentStrokeToShape(bool isDynamicResize = false)
         {
             if (_currentStrokePath == null || _rawStrokePoints.Count < 6) return;
@@ -963,7 +1019,6 @@ namespace Tagsor
 
             var stack = new StackPanel { Orientation = Orientation.Vertical };
 
-            // 1. Tool Mode: Pen vs Highlighter
             var penBtn = CreateSidebarIconButton("✏️", "Pen tool (hold stroke to snap shape)", !_isHighlighterMode, textBrush, activePillBrush);
             var highBtn = CreateSidebarIconButton("🖍", "Highlighter tool", _isHighlighterMode, textBrush, activePillBrush);
 
@@ -987,7 +1042,6 @@ namespace Tagsor
             stack.Children.Add(highBtn);
             stack.Children.Add(CreateSidebarDivider(dividerBrush));
 
-            // 2. Stroke Width: Thin (3), Medium (6), Thick (11)
             var widthButtons = new List<Button>();
             double[] widths = { 3.0, 6.0, 11.0 };
             double[] dotSizes = { 5.0, 9.0, 14.0 };
@@ -1029,7 +1083,6 @@ namespace Tagsor
 
             stack.Children.Add(CreateSidebarDivider(dividerBrush));
 
-            // 3. Color Swatches
             var swatchRings = new List<Border>();
             string[] swatches = { _activeProfile.AccentHex, "#F87171", "#FBBF24", "#34D399", "#FFFFFF" };
             string[] swatchNames = { "Accent color", "Coral Red", "Amber Yellow", "Emerald Green", "Pure White" };
@@ -1073,7 +1126,6 @@ namespace Tagsor
 
             stack.Children.Add(CreateSidebarDivider(dividerBrush));
 
-            // 4. Pin Strokes (Disable Auto-Fade), Clear Canvas, Exit Draw Mode
             var pinBtn = CreateSidebarIconButton("📌", "Keep strokes pinned (disable 2.5s auto-fade)", !_markerAutoFade, textBrush, activePillBrush);
             pinBtn.Click += (s, e) =>
             {
@@ -1162,6 +1214,7 @@ namespace Tagsor
 
             _isShowingKeys = false;
             _typedKeys.Clear();
+            _hasPendingStandaloneShift = false;
             _activeStatusText = statusLabel;
             _statusExpiryTime = DateTime.UtcNow.AddSeconds(5);
             _lastActivityTime = DateTime.UtcNow;
@@ -1270,6 +1323,7 @@ namespace Tagsor
             {
                 _isShowingKeys = false;
                 _typedKeys.Clear();
+                _hasPendingStandaloneShift = false;
                 RestoreNameOrStatus();
             }
 
@@ -1332,7 +1386,7 @@ namespace Tagsor
         {
             try
             {
-                string? exePath = Process.GetCurrentProcess().MainModule?.FileName;
+                string? exePath = Environment.ProcessPath ?? Process.GetCurrentProcess().MainModule?.FileName;
                 if (!string.IsNullOrEmpty(exePath) && !exePath.EndsWith("dotnet.exe", StringComparison.OrdinalIgnoreCase))
                 {
                     using var key = Registry.CurrentUser.OpenSubKey(@"SOFTWARE\Microsoft\Windows\CurrentVersion\Run", true);
@@ -1389,8 +1443,18 @@ namespace Tagsor
             if (data is RawInputKeyboardData keyboardData)
             {
                 int vk = keyboardData.Keyboard.VirutalKey;
+                bool isKeyUp = keyboardData.Keyboard.Flags.HasFlag(RawKeyboardFlags.Up);
 
-                if (!keyboardData.Keyboard.Flags.HasFlag(RawKeyboardFlags.Up) && vk == 0x1B)
+                if (isKeyUp)
+                {
+                    if (vk == VK_SHIFT || vk == 0xA0 || vk == 0xA1)
+                    {
+                        _hasPendingStandaloneShift = false;
+                    }
+                    return;
+                }
+
+                if (vk == 0x1B)
                 {
                     if (_isMarkerActive)
                     {
@@ -1409,16 +1473,36 @@ namespace Tagsor
 
                 if (_isPrivacyMode) return;
 
-                if (!keyboardData.Keyboard.Flags.HasFlag(RawKeyboardFlags.Up) && vk > 0 && vk < 255)
+                if (vk > 0 && vk < 255)
                 {
                     if (IsPasswordFieldFocused()) return;
 
-                    var keyItem = CreateKeyDisplayItem(vk);
+                    bool isShiftDown = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
+                    bool isOtherModifierDown =
+                        (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 ||
+                        (GetAsyncKeyState(VK_MENU) & 0x8000) != 0 ||
+                        (GetAsyncKeyState(VK_LWIN) & 0x8000) != 0 ||
+                        (GetAsyncKeyState(VK_RWIN) & 0x8000) != 0;
+
+                    var keyItem = CreateKeyDisplayItem(vk, keyboardData.Keyboard.ScanCode, isShiftDown, isOtherModifierDown, out bool consumedShift);
                     if (keyItem != null)
                     {
                         _lastActivityTime = DateTime.UtcNow;
                         _lastKeyTime = DateTime.UtcNow;
                         _isShowingKeys = true;
+
+                        // Replace a preceding standalone Shift icon when a shifted symbol/letter resolves (e.g., Shift + , -> <)
+                        if (consumedShift && _hasPendingStandaloneShift && _typedKeys.Count > 0 && _typedKeys[^1].KeyId == "Shift"
+                            && (DateTime.UtcNow - _pendingShiftTime).TotalSeconds < 1.1)
+                        {
+                            _typedKeys.RemoveAt(_typedKeys.Count - 1);
+                        }
+
+                        _hasPendingStandaloneShift = (keyItem.KeyId == "Shift");
+                        if (_hasPendingStandaloneShift)
+                        {
+                            _pendingShiftTime = DateTime.UtcNow;
+                        }
 
                         if (_typedKeys.Count > 0 && _typedKeys[^1].KeyId == keyItem.KeyId)
                         {
@@ -1468,10 +1552,6 @@ namespace Tagsor
                     }
                 }
 
-                // A single raw report can carry several button flags (e.g. a fast click reports
-                // down and up together), so handle every flag instead of an else-if chain.
-                // Button handling must not depend on the device lookup below: synthesized input
-                // (touchpads, remote desktop, mouse-sharing tools, some drivers) has no device handle.
                 var buttons = mouseData.Mouse.Buttons;
                 if (buttons.HasFlag(RawMouseButtonFlags.LeftButtonDown)) OnMouseButtonChanged("LMB", true);
                 if (buttons.HasFlag(RawMouseButtonFlags.RightButtonDown)) OnMouseButtonChanged("RMB", true);
@@ -1485,12 +1565,11 @@ namespace Tagsor
                     _overlay.TriggerScrollBounce(mouseData.Mouse.ButtonData);
                 }
 
-                // Per-mouse profiles need a real device; input without one keeps the current profile.
                 RawInputDevice? sourceDevice = null;
                 try { sourceDevice = mouseData.Device; } catch { }
                 if (sourceDevice == null) return;
 
-                string deviceId = sourceDevice.DevicePath ?? mouseData.Header.DeviceHandle.ToString();
+                string deviceId = NormalizeDeviceKey(sourceDevice.DevicePath, mouseData.Header.DeviceHandle.ToString());
                 _activeDeviceId = deviceId;
 
                 if (_savedMice.TryGetValue(deviceId, out MouseProfile? savedProfile))
@@ -1507,8 +1586,6 @@ namespace Tagsor
                 }
                 else if (!_promptingDevices.Contains(deviceId) && !_skippedDevices.Contains(deviceId))
                 {
-                    // Unknown mouse: always ask for a name. On a fresh install (nothing saved yet)
-                    // this is the first-run welcome prompt.
                     bool isFirstRun = _savedMice.Count == 0;
                     _promptingDevices.Add(deviceId);
                     Dispatcher.BeginInvoke(() => PromptForNewMouseName(deviceId, isFirstRun));
@@ -1522,7 +1599,7 @@ namespace Tagsor
 
             if (isDown)
             {
-                if (!_pressedButtons.Add(label)) return; // already tracked as held
+                if (!_pressedButtons.Add(label)) return;
 
                 _lastActivityTime = now;
 
@@ -1545,7 +1622,6 @@ namespace Tagsor
 
             if (_pressedButtons.Count > 0)
             {
-                // Another button is still held: keep showing that one.
                 _heldMouseButton = _pressedButtons.First();
                 _mouseDownTime = now;
                 _holdBadgeShown = false;
@@ -1560,8 +1636,6 @@ namespace Tagsor
             }
         }
 
-        // Safety net: raw input can miss button events (injected input, UI-privilege boundaries,
-        // driver quirks). Reconcile with the real button state; OnMouseButtonChanged is idempotent.
         private void SyncMouseButtonsFromAsyncState()
         {
             ReconcileButton("LMB", VK_LBUTTON);
@@ -1578,8 +1652,9 @@ namespace Tagsor
             }
         }
 
-        private KeyDisplayItem? CreateKeyDisplayItem(int vkCode)
+        private KeyDisplayItem? CreateKeyDisplayItem(int vkCode, int scanCode, bool isShiftDown, bool isOtherModifierDown, out bool consumedShift)
         {
+            consumedShift = false;
             Key wpfKey = KeyInterop.KeyFromVirtualKey(vkCode);
             if (wpfKey == Key.None) return null;
 
@@ -1637,9 +1712,6 @@ namespace Tagsor
                 case Key.MediaNextTrack: return new KeyDisplayItem { KeyId = keyId, Label = "Next" };
                 case Key.MediaPreviousTrack: return new KeyDisplayItem { KeyId = keyId, Label = "Prev" };
 
-                case >= Key.D0 and <= Key.D9:
-                    string dLabel = ((char)('0' + (wpfKey - Key.D0))).ToString();
-                    return new KeyDisplayItem { KeyId = dLabel, Label = dLabel };
                 case >= Key.NumPad0 and <= Key.NumPad9:
                     string nLabel = ((char)('0' + (wpfKey - Key.NumPad0))).ToString();
                     return new KeyDisplayItem { KeyId = nLabel, Label = nLabel };
@@ -1650,6 +1722,22 @@ namespace Tagsor
                 case Key.Divide: return new KeyDisplayItem { KeyId = "/", Label = "/" };
                 case >= Key.F1 and <= Key.F12:
                     return new KeyDisplayItem { KeyId = keyId, Label = keyId };
+            }
+
+            if (!isOtherModifierDown)
+            {
+                string? resolved = ResolveCharacterWithShift(vkCode, (uint)scanCode, isShiftDown);
+                if (!string.IsNullOrEmpty(resolved))
+                {
+                    if (isShiftDown) consumedShift = true;
+                    return new KeyDisplayItem { KeyId = resolved, Label = resolved };
+                }
+            }
+
+            if (wpfKey >= Key.D0 && wpfKey <= Key.D9)
+            {
+                string dLabel = ((char)('0' + (wpfKey - Key.D0))).ToString();
+                return new KeyDisplayItem { KeyId = dLabel, Label = dLabel };
             }
 
             uint mappedChar = MapVirtualKey((uint)vkCode, MAPVK_VK_TO_CHAR) & 0xFFFF;
@@ -1663,6 +1751,57 @@ namespace Tagsor
             if (fallback.StartsWith("Oem", StringComparison.OrdinalIgnoreCase)) return null;
 
             return new KeyDisplayItem { KeyId = fallback, Label = fallback };
+        }
+
+        private static string? ResolveCharacterWithShift(int vkCode, uint scanCode, bool isShiftDown)
+        {
+            byte[] keyState = new byte[256];
+            if (isShiftDown)
+            {
+                keyState[VK_SHIFT] = 0x80;
+            }
+
+            var sb = new StringBuilder(4);
+            int result = ToUnicode((uint)vkCode, scanCode, keyState, sb, sb.Capacity, 0x4);
+            if (result > 0)
+            {
+                char c = sb[0];
+                if (!char.IsControl(c) && !char.IsWhiteSpace(c))
+                {
+                    return char.IsLetter(c) ? char.ToUpperInvariant(c).ToString() : c.ToString();
+                }
+            }
+
+            if (isShiftDown)
+            {
+                return vkCode switch
+                {
+                    0x31 => "!",
+                    0x32 => "@",
+                    0x33 => "#",
+                    0x34 => "$",
+                    0x35 => "%",
+                    0x36 => "^",
+                    0x37 => "&",
+                    0x38 => "*",
+                    0x39 => "(",
+                    0x30 => ")",
+                    0xBD => "_",
+                    0xBB => "+",
+                    0xDB => "{",
+                    0xDD => "}",
+                    0xDC => "|",
+                    0xBA => ":",
+                    0xDE => "\"",
+                    0xBC => "<",
+                    0xBE => ">",
+                    0xBF => "?",
+                    0xC0 => "~",
+                    _ => null
+                };
+            }
+
+            return null;
         }
 
         private void PromptForNewMouseName(string deviceId, bool isFirstRun)
@@ -1689,15 +1828,11 @@ namespace Tagsor
             }
             else
             {
-                // Dismissed: don't nag on every mouse movement. Asked again on next launch,
-                // or any time via tray menu > Rename mouse.
                 _skippedDevices.Add(deviceId);
             }
             _promptingDevices.Remove(deviceId);
         }
 
-        // Older versions stored profiles in %AppData%\DualCursorApp. Move them to %AppData%\Tagsor once,
-        // so existing users keep their saved names instead of being asked again.
         private void MigrateLegacySaveFile(string legacyFolder)
         {
             try
@@ -1712,10 +1847,7 @@ namespace Tagsor
                     Directory.Delete(legacyFolder);
                 }
             }
-            catch
-            {
-                // Best effort: if the move fails the app simply asks for names again.
-            }
+            catch { }
         }
 
         private void LoadSavedMice()
@@ -1725,19 +1857,51 @@ namespace Tagsor
                 try
                 {
                     string json = File.ReadAllText(_saveFilePath);
-                    _savedMice = JsonSerializer.Deserialize<Dictionary<string, MouseProfile>>(json) ?? new();
+                    var rawLoaded = JsonSerializer.Deserialize<Dictionary<string, MouseProfile>>(json) ?? new();
+
+                    var normalized = new Dictionary<string, MouseProfile>(StringComparer.OrdinalIgnoreCase);
+                    bool migratedKeys = false;
+
+                    foreach (var kvp in rawLoaded)
+                    {
+                        string stableKey = NormalizeDeviceKey(kvp.Key);
+                        if (!string.Equals(stableKey, kvp.Key, StringComparison.Ordinal))
+                        {
+                            migratedKeys = true;
+                        }
+                        normalized[stableKey] = kvp.Value;
+                    }
+
+                    _savedMice = normalized;
+
+                    if (_savedMice.Count > 0)
+                    {
+                        var lastEntry = _savedMice.Last();
+                        _activeDeviceId = lastEntry.Key;
+                        _activeProfile = lastEntry.Value;
+                    }
+
+                    if (migratedKeys)
+                    {
+                        SaveMiceToDisk();
+                    }
                 }
                 catch
                 {
-                    _savedMice = new();
+                    _savedMice = new(StringComparer.OrdinalIgnoreCase);
                 }
             }
         }
 
         private void SaveMiceToDisk()
         {
-            string json = JsonSerializer.Serialize(_savedMice, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(_saveFilePath, json);
+            try
+            {
+                Directory.CreateDirectory(IOPath.GetDirectoryName(_saveFilePath)!);
+                string json = JsonSerializer.Serialize(_savedMice, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(_saveFilePath, json);
+            }
+            catch { }
         }
     }
 }

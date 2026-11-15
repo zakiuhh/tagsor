@@ -8,67 +8,78 @@
         ShowInTaskbar="False"
         IsHitTestVisible="False"
         SizeToContent="WidthAndHeight"
-        MinWidth="0"
-        MinHeight="0"
+        ResizeMode="NoResize"
         TextOptions.TextFormattingMode="Ideal"
         TextOptions.TextRenderingMode="ClearType"
-        UseLayoutRounding="True"
-        SnapsToDevicePixels="True">
+        RenderOptions.BitmapScalingMode="HighQuality">
 
-    <Grid Margin="12">
-        <!-- Main Floating Pill -->
+    <Grid Margin="14" RenderTransformOrigin="0.5,0.5">
+        <Grid.RenderTransform>
+            <TransformGroup>
+                <ScaleTransform x:Name="PillScale" ScaleX="1" ScaleY="1"/>
+                <RotateTransform x:Name="PillRotate" Angle="0"/>
+                <TranslateTransform x:Name="PillTranslate" X="0" Y="0"/>
+            </TransformGroup>
+        </Grid.RenderTransform>
+
+        <!-- Morphing Pill Shell (Opaque blended border + inner background prevents dark bleed & shadow box artifacts) -->
         <Border x:Name="PillBorder"
+                Background="Transparent"
+                BorderBrush="#60A5FA"
+                BorderThickness="1.5"
+                CornerRadius="12"
                 HorizontalAlignment="Left"
-                VerticalAlignment="Top"
-                Background="#2B2B30"
-                BorderBrush="#42424A"
-                BorderThickness="1.2"
-                CornerRadius="8"
-                Padding="10,4"
-                RenderTransformOrigin="0.5,0.5">
-            <Border.RenderTransform>
-                <TransformGroup>
-                    <ScaleTransform x:Name="PillScale" ScaleX="1" ScaleY="1" />
-                    <RotateTransform x:Name="PillRotate" Angle="0" />
-                    <TranslateTransform x:Name="PillTranslate" X="0" Y="0" />
-                </TransformGroup>
-            </Border.RenderTransform>
-            <Border.Effect>
-                <DropShadowEffect x:Name="PillShadow" BlurRadius="8" ShadowDepth="2" Opacity="0.45" Color="#000000"/>
-            </Border.Effect>
+                VerticalAlignment="Top">
 
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                <Grid>
-                    <TextBlock x:Name="UserNameLabel"
-                               Text="Guest"
-                               Foreground="#EFEFEF"
-                               FontFamily="Segoe UI"
-                               FontSize="12.5"
-                               FontWeight="Medium"
-                               TextWrapping="NoWrap" />
+            <Border x:Name="PillInnerBackground"
+                    Background="#2B2B30"
+                    CornerRadius="10.5">
 
-                    <StackPanel x:Name="KeysPanel"
-                                Orientation="Horizontal"
-                                VerticalAlignment="Center"
-                                Visibility="Collapsed" />
+                <!-- Inner Measured Content (Measured invisibly to drive smooth target bounds) -->
+                <Grid x:Name="PillContentGrid"
+                      Margin="10,4.5"
+                      HorizontalAlignment="Left"
+                      VerticalAlignment="Center"
+                      RenderTransformOrigin="0.5,0.5">
+                    <Grid.RenderTransform>
+                        <ScaleTransform x:Name="ContentScale" ScaleX="1" ScaleY="1"/>
+                    </Grid.RenderTransform>
+
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <!-- Active User Name OR Status Chip -->
+                        <TextBlock x:Name="UserNameLabel"
+                                   Text="Zaki"
+                                   Foreground="#EFEFEF"
+                                   FontFamily="Segoe UI"
+                                   FontSize="12.5"
+                                   FontWeight="Medium"
+                                   VerticalAlignment="Center"
+                                   TextOptions.TextFormattingMode="Ideal"/>
+
+                        <!-- Keystrokes + Repeat Counter -->
+                        <StackPanel x:Name="KeysPanel"
+                                    Orientation="Horizontal"
+                                    VerticalAlignment="Center"
+                                    Visibility="Collapsed"/>
+
+                        <!-- Drag-Hold Badge (LMB / RMB / MMB) -->
+                        <Border x:Name="HoldBadge"
+                                Visibility="Collapsed"
+                                Margin="6,0,0,0"
+                                Padding="5,1"
+                                CornerRadius="4"
+                                Background="#60A5FA"
+                                VerticalAlignment="Center">
+                            <TextBlock x:Name="HoldBadgeText"
+                                       Text="LMB"
+                                       Foreground="#111115"
+                                       FontFamily="Segoe UI"
+                                       FontSize="10"
+                                       FontWeight="Bold"/>
+                        </Border>
+                    </StackPanel>
                 </Grid>
-
-                <!-- Drag / Button Hold Badge (LMB / RMB / MMB) -->
-                <Border x:Name="HoldBadge"
-                        Visibility="Collapsed"
-                        Margin="7,0,0,0"
-                        Padding="5,1"
-                        CornerRadius="4"
-                        Background="#60A5FA">
-                    <TextBlock x:Name="HoldBadgeText"
-                               Text="LMB"
-                               Foreground="#111115"
-                               FontFamily="Segoe UI"
-                               FontSize="10"
-                               FontWeight="Bold"
-                               VerticalAlignment="Center" />
-                </Border>
-            </StackPanel>
+            </Border>
         </Border>
     </Grid>
 </Window>
