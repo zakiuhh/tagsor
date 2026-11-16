@@ -52,6 +52,23 @@ namespace Tagsor
             Closed += (_, _) => CompositionTarget.Rendering -= OnRenderMorphFrame;
         }
 
+        private double _baseActiveOpacity = 1.0;
+
+        public void ApplyAppearance(double scale, double cornerRadius, double opacity)
+        {
+            _baseActiveOpacity = Math.Clamp(opacity, 0.4, 1.0);
+
+            if (this.Content is FrameworkElement root)
+            {
+                root.LayoutTransform = new ScaleTransform(scale, scale);
+                root.Opacity = _baseActiveOpacity;
+
+                if (root is Border outerBorder)
+                {
+                    outerBorder.CornerRadius = new CornerRadius(cornerRadius);
+                }
+            }
+        }
         // 120Hz Liquid Shape Morphing Loop
         private void OnRenderMorphFrame(object? sender, EventArgs e)
         {

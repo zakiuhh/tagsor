@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text.Json;
 using System.Windows.Input;
@@ -7,9 +8,17 @@ namespace Tagsor
 {
     public class AppSettings
     {
+        // Timing
         public double IdleFadeSeconds { get; set; } = 2.5;
         public double KeystrokeDisplaySeconds { get; set; } = 1.1;
 
+        // Appearance
+        public double PillScale { get; set; } = 1.0;          // 0.8 to 1.4
+        public double PillCornerRadius { get; set; } = 15.0;  // 4.0 (sharp badge) to 22.0 (full pill)
+        public double PillOpacity { get; set; } = 1.0;        // 0.4 to 1.0
+        public string PositionOffsetMode { get; set; } = "BottomRight"; // "BottomRight", "TopRight", "CenteredBelow"
+
+        // Shortcuts
         public string PrivacyHotkey { get; set; } = "Ctrl+Alt+H";
         public string SpotlightHotkey { get; set; } = "Ctrl+Alt+S";
         public string MarkerHotkey { get; set; } = "Ctrl+Alt+D";
@@ -17,11 +26,35 @@ namespace Tagsor
         public string Status2Hotkey { get; set; } = "Ctrl+Alt+2";
         public string Status3Hotkey { get; set; } = "Ctrl+Alt+3";
 
+        public void Sanitize()
+        {
+            IdleFadeSeconds = Math.Clamp(IdleFadeSeconds, 0.5, 30.0);
+            KeystrokeDisplaySeconds = Math.Clamp(KeystrokeDisplaySeconds, 0.3, 10.0);
+
+            PillScale = Math.Clamp(PillScale, 0.8, 1.4);
+            PillCornerRadius = Math.Clamp(PillCornerRadius, 4.0, 22.0);
+            PillOpacity = Math.Clamp(PillOpacity, 0.4, 1.0);
+
+            if (PositionOffsetMode != "BottomRight" &&
+                PositionOffsetMode != "TopRight" &&
+                PositionOffsetMode != "CenteredBelow")
+            {
+                PositionOffsetMode = "BottomRight";
+            }
+
+            if (string.IsNullOrWhiteSpace(PrivacyHotkey)) PrivacyHotkey = "Ctrl+Alt+H";
+            if (string.IsNullOrWhiteSpace(SpotlightHotkey)) SpotlightHotkey = "Ctrl+Alt+S";
+            if (string.IsNullOrWhiteSpace(MarkerHotkey)) MarkerHotkey = "Ctrl+Alt+D";
+            if (string.IsNullOrWhiteSpace(Status1Hotkey)) Status1Hotkey = "Ctrl+Alt+1";
+            if (string.IsNullOrWhiteSpace(Status2Hotkey)) Status2Hotkey = "Ctrl+Alt+2";
+            if (string.IsNullOrWhiteSpace(Status3Hotkey)) Status3Hotkey = "Ctrl+Alt+3";
+        }
+
         public static AppSettings LoadOrCreate(string filePath)
         {
-            try
+            if (File.Exists(filePath))
             {
-                if (File.Exists(filePath))
+                try
                 {
                     string json = File.ReadAllText(filePath);
                     var loaded = JsonSerializer.Deserialize<AppSettings>(json);
@@ -31,8 +64,11 @@ namespace Tagsor
                         return loaded;
                     }
                 }
+                catch
+                {
+                    try { File.Copy(filePath, filePath + ".corrupt.bak", overwrite: true); } catch { }
+                }
             }
-            catch { }
 
             var defaults = new AppSettings();
             defaults.Save(filePath);
@@ -44,25 +80,11 @@ namespace Tagsor
             try
             {
                 Sanitize();
-                string? dir = Path.GetDirectoryName(filePath);
-                if (!string.IsNullOrEmpty(dir)) Directory.CreateDirectory(dir);
+                Directory.CreateDirectory(Path.GetDirectoryName(filePath)!);
                 string json = JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(filePath, json);
             }
             catch { }
-        }
-
-        public void Sanitize()
-        {
-            IdleFadeSeconds = Math.Clamp(IdleFadeSeconds, 0.3, 60.0);
-            KeystrokeDisplaySeconds = Math.Clamp(KeystrokeDisplaySeconds, 0.3, 15.0);
-
-            if (string.IsNullOrWhiteSpace(PrivacyHotkey)) PrivacyHotkey = "Ctrl+Alt+H";
-            if (string.IsNullOrWhiteSpace(SpotlightHotkey)) SpotlightHotkey = "Ctrl+Alt+S";
-            if (string.IsNullOrWhiteSpace(MarkerHotkey)) MarkerHotkey = "Ctrl+Alt+D";
-            if (string.IsNullOrWhiteSpace(Status1Hotkey)) Status1Hotkey = "Ctrl+Alt+1";
-            if (string.IsNullOrWhiteSpace(Status2Hotkey)) Status2Hotkey = "Ctrl+Alt+2";
-            if (string.IsNullOrWhiteSpace(Status3Hotkey)) Status3Hotkey = "Ctrl+Alt+3";
         }
 
         public static bool TryParseHotkey(string? shortcut, out uint modifiers, out uint virtualKey)
@@ -71,42 +93,35 @@ namespace Tagsor
             virtualKey = 0;
             if (string.IsNullOrWhiteSpace(shortcut)) return false;
 
-            string[] parts = shortcut.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
-            if (parts.Length == 0) return false;
-
+            var parts = shortcut.Split('+', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             Key mainKey = Key.None;
 
-            foreach (string rawPart in parts)
+            foreach (var raw in parts)
             {
-                string part = rawPart.ToUpperInvariant();
-                switch (part)
+                switch (raw.ToUpperInvariant())
                 {
                     case "CTRL":
                     case "CONTROL":
-                        modifiers |= 0x0002; // MOD_CONTROL
+                        modifiers |= 0x0002;
                         break;
                     case "ALT":
-                        modifiers |= 0x0001; // MOD_ALT
+                        modifiers |= 0x0001;
                         break;
                     case "SHIFT":
-                        modifiers |= 0x0004; // MOD_SHIFT
+                        modifiers |= 0x0004;
                         break;
                     case "WIN":
                     case "WINDOWS":
-                        modifiers |= 0x0008; // MOD_WIN
+                        modifiers |= 0x0008;
                         break;
                     default:
-                        if (part.Length == 1 && part[0] >= '0' && part[0] <= '9')
+                        if (raw.Length == 1 && char.IsDigit(raw[0]))
                         {
-                            mainKey = Key.D0 + (part[0] - '0');
+                            mainKey = (Key)((int)Key.D0 + (raw[0] - '0'));
                         }
-                        else if (part.Length == 1 && part[0] >= 'A' && part[0] <= 'Z')
+                        else if (Enum.TryParse<Key>(raw, true, out var parsed))
                         {
-                            mainKey = Key.A + (part[0] - 'A');
-                        }
-                        else if (Enum.TryParse<Key>(rawPart, true, out var parsedKey))
-                        {
-                            mainKey = parsedKey;
+                            mainKey = parsed;
                         }
                         break;
                 }

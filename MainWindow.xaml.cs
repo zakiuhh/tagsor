@@ -8,6 +8,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
@@ -56,6 +57,7 @@ namespace Tagsor
         private readonly string _settingsFilePath;
         private AppSettings _settings = new();
         private FileSystemWatcher? _settingsWatcher;
+        private UpdateInfo? _availableUpdate;
 
         private Dictionary<string, MouseProfile> _savedMice = new(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _promptingDevices = new(StringComparer.OrdinalIgnoreCase);
@@ -190,7 +192,10 @@ namespace Tagsor
             _overlay.SetAccentColor(_activeProfile.AccentHex);
             _overlay.SourceInitialized += OnOverlaySourceInitialized;
             _overlay.Show();
+            _overlay.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity);
             SyncWithWindowsTheme();
+
+            _ = CheckForUpdatesAndNotifyPillAsync();
 
             SystemEvents.UserPreferenceChanged += OnUserPreferenceChanged;
             if (Application.Current != null)
@@ -226,6 +231,34 @@ namespace Tagsor
             };
         }
 
+        private async Task CheckForUpdatesAndNotifyPillAsync()
+        {
+            await Task.Delay(1800);
+
+            var info = await UpdateService.CheckForUpdatesAsync();
+            if (info == null || !info.IsNewerAvailable) return;
+
+            _availableUpdate = info;
+            _trayIcon.Text = $"Tagsor (Update {info.VersionTag} available)";
+
+            if (_isOverlayPaused || _isShowingKeys) return;
+
+            // Temporarily switch the cursor pill name to "Update available" for 6 seconds, then revert back
+            string label = string.IsNullOrWhiteSpace(info.VersionTag)
+                ? "✨ Update available"
+                : $"✨ Update {info.VersionTag} available";
+
+            _isShowingKeys = false;
+            _typedKeys.Clear();
+            _hasPendingStandaloneShift = false;
+            _activeStatusText = label;
+            _statusExpiryTime = DateTime.UtcNow.AddSeconds(6);
+            _lastActivityTime = DateTime.UtcNow;
+
+            _overlay.SetIdleState(false);
+            _overlay.ShowStatusChip(label, "#38BDF8");
+        }
+
         private void StartSettingsWatcher(string folder)
         {
             try
@@ -239,6 +272,7 @@ namespace Tagsor
                     Dispatcher.BeginInvoke(() =>
                     {
                         _settings = AppSettings.LoadOrCreate(_settingsFilePath);
+                        _overlay?.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity);
                         if (_overlay != null)
                         {
                             var hwnd = new WindowInteropHelper(_overlay).Handle;
@@ -326,12 +360,29 @@ namespace Tagsor
         private void OpenSettingsWindow()
         {
             string appDataFolder = IOPath.GetDirectoryName(_settingsFilePath)!;
-            var win = new SettingsWindow(_settings, _savedMice, _activeDeviceId, IsStartupEnabled(), appDataFolder);
+            var win = new SettingsWindow(_settings, _savedMice, _activeDeviceId, IsStartupEnabled(), appDataFolder, _availableUpdate);
+
+            win.OnLiveAppearancePreview += (scale, radius, opacity, offsetMode) =>
+            {
+                _settings.PillScale = scale;
+                _settings.PillCornerRadius = radius;
+                _settings.PillOpacity = opacity;
+                _settings.PositionOffsetMode = offsetMode;
+                _overlay.ApplyAppearance(scale, radius, opacity);
+            };
+
+            win.OnInstallUpdateAndRestart += () =>
+            {
+                Close();
+            };
+
+            var previousAppearance = (_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity, _settings.PositionOffsetMode);
 
             if (win.ShowDialog() == true)
             {
                 _settings = win.UpdatedSettings;
                 _settings.Save(_settingsFilePath);
+                _overlay.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity);
 
                 _savedMice = win.WorkingMice;
                 SaveMiceToDisk();
@@ -366,6 +417,11 @@ namespace Tagsor
                 {
                     RegisterConfiguredHotkeys(hwnd);
                 }
+            }
+            else
+            {
+                (_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity, _settings.PositionOffsetMode) = previousAppearance;
+                _overlay.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity);
             }
         }
 
@@ -1420,6 +1476,7 @@ namespace Tagsor
                 string color = _activeStatusText.StartsWith("👀") ? "#38BDF8"
                              : _activeStatusText.StartsWith("⏸") ? "#F59E0B"
                              : _activeStatusText.StartsWith("✅") ? "#34D399"
+                             : _activeStatusText.StartsWith("✨ Update") ? "#38BDF8"
                              : _markerColorHex;
                 _overlay.ShowStatusChip(_activeStatusText, color);
             }
@@ -1472,13 +1529,26 @@ namespace Tagsor
                 double pillW = _overlay.ActualWidth > 0 ? _overlay.ActualWidth : 90;
                 double pillH = _overlay.ActualHeight > 0 ? _overlay.ActualHeight : 45;
 
-                double targetX = (cursorDipX + BaseOffsetX + pillW > screenW)
-                    ? cursorDipX - pillW + 4
-                    : cursorDipX + BaseOffsetX;
+                double targetX;
+                double targetY;
 
-                double targetY = (cursorDipY + BaseOffsetY + pillH > screenH)
-                    ? cursorDipY - pillH + 2
-                    : cursorDipY + BaseOffsetY;
+                switch (_settings.PositionOffsetMode)
+                {
+                    case "TopRight":
+                        targetX = (cursorDipX + 12 + pillW > screenW) ? cursorDipX - pillW - 6 : cursorDipX + 12;
+                        targetY = (cursorDipY - pillH - 6 < SystemParameters.VirtualScreenTop) ? cursorDipY + 18 : cursorDipY - pillH - 6;
+                        break;
+
+                    case "CenteredBelow":
+                        targetX = Math.Clamp(cursorDipX - (pillW / 2.0), SystemParameters.VirtualScreenLeft + 4, screenW - pillW - 4);
+                        targetY = (cursorDipY + 24 + pillH > screenH) ? cursorDipY - pillH - 8 : cursorDipY + 24;
+                        break;
+
+                    default: // "BottomRight"
+                        targetX = (cursorDipX + BaseOffsetX + pillW > screenW) ? cursorDipX - pillW + 4 : cursorDipX + BaseOffsetX;
+                        targetY = (cursorDipY + BaseOffsetY + pillH > screenH) ? cursorDipY - pillH + 2 : cursorDipY + BaseOffsetY;
+                        break;
+                }
 
                 if (!_hasInitializedPosition)
                 {
@@ -1745,7 +1815,6 @@ namespace Tagsor
 
                 string physicalDeviceId = NormalizeDeviceKey(sourceDevice.DevicePath, mouseData.Header.DeviceHandle.ToString());
 
-                // Respect manual profile switch until a different physical mouse moves
                 if (!string.IsNullOrEmpty(_manualOverrideDeviceId) && _savedMice.ContainsKey(_manualOverrideDeviceId))
                 {
                     if (!string.Equals(physicalDeviceId, _activeDeviceId, StringComparison.OrdinalIgnoreCase) && _savedMice.ContainsKey(physicalDeviceId))
