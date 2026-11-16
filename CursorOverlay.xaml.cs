@@ -54,21 +54,43 @@ namespace Tagsor
 
         private double _baseActiveOpacity = 1.0;
 
-        public void ApplyAppearance(double scale, double cornerRadius, double opacity)
-        {
-            _baseActiveOpacity = Math.Clamp(opacity, 0.4, 1.0);
-
-            if (this.Content is FrameworkElement root)
-            {
-                root.LayoutTransform = new ScaleTransform(scale, scale);
-                root.Opacity = _baseActiveOpacity;
-
-                if (root is Border outerBorder)
+                public void ApplyAppearance(double scale, double cornerRadius, double opacity, bool animate = true)
                 {
-                    outerBorder.CornerRadius = new CornerRadius(cornerRadius);
+                    _baseActiveOpacity = Math.Clamp(opacity, 0.4, 1.0);
+
+                    if (this.Content is FrameworkElement root)
+                    {
+                        if (root.LayoutTransform is not ScaleTransform st)
+                        {
+                            st = new ScaleTransform(scale, scale);
+                            root.LayoutTransform = st;
+                        }
+
+                        if (animate)
+                        {
+                            var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+                            var dur = TimeSpan.FromMilliseconds(160);
+
+                            st.BeginAnimation(ScaleTransform.ScaleXProperty, new DoubleAnimation(scale, dur) { EasingFunction = ease });
+                            st.BeginAnimation(ScaleTransform.ScaleYProperty, new DoubleAnimation(scale, dur) { EasingFunction = ease });
+                            root.BeginAnimation(OpacityProperty, new DoubleAnimation(_baseActiveOpacity, dur) { EasingFunction = ease });
+                        }
+                        else
+                        {
+                            st.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+                            st.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+                            st.ScaleX = scale;
+                            st.ScaleY = scale;
+                            root.BeginAnimation(OpacityProperty, null);
+                            root.Opacity = _baseActiveOpacity;
+                        }
+
+                        if (root is Border outerBorder)
+                        {
+                            outerBorder.CornerRadius = new CornerRadius(cornerRadius);
+                        }
+                    }
                 }
-            }
-        }
         // 120Hz Liquid Shape Morphing Loop
         private void OnRenderMorphFrame(object? sender, EventArgs e)
         {

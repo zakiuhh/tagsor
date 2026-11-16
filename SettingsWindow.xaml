@@ -61,6 +61,7 @@
         <SolidColorBrush x:Key="CardBorderBrush" Color="#2E2E36"/>
         <SolidColorBrush x:Key="SectionBgBrush" Color="#24242B"/>
         <SolidColorBrush x:Key="SectionBorderBrush" Color="#32323C"/>
+        <SolidColorBrush x:Key="RowHoverBrush" Color="#2B2B33"/>
         <SolidColorBrush x:Key="DividerBrush" Color="#2E2E37"/>
         <SolidColorBrush x:Key="TabBarBgBrush" Color="#151519"/>
         <SolidColorBrush x:Key="ActiveTabBgBrush" Color="#2B2B34"/>
@@ -294,7 +295,7 @@
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Border" Property="Background" Value="{DynamicResource DangerHoverBrush}"/>
-                                <Setter TargetName="Border" Property="Foreground" Value="{DynamicResource DangerTextBrush}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource DangerTextBrush}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -389,7 +390,7 @@
             </Setter>
         </Style>
 
-        <!-- Fluid Non-Sticky Slider Style -->
+        <!-- Fluid 60+ FPS Slider with Click-to-Point & Hover/Drag Thumb Scale -->
         <Style x:Key="SleekSliderStyle" TargetType="Slider">
             <Setter Property="Height" Value="24"/>
             <Setter Property="IsMoveToPointEnabled" Value="True"/>
@@ -434,17 +435,23 @@
                                                         BorderThickness="2.5"
                                                         RenderTransformOrigin="0.5,0.5">
                                                     <Border.RenderTransform>
-                                                        <ScaleTransform x:Name="ThumbScale" ScaleX="1" ScaleY="1"/>
+                                                        <ScaleTransform ScaleX="1" ScaleY="1"/>
                                                     </Border.RenderTransform>
                                                 </Border>
                                                 <ControlTemplate.Triggers>
                                                     <Trigger Property="IsMouseOver" Value="True">
-                                                        <Setter TargetName="ThumbScale" Property="ScaleX" Value="1.18"/>
-                                                        <Setter TargetName="ThumbScale" Property="ScaleY" Value="1.18"/>
+                                                        <Setter TargetName="ThumbCircle" Property="RenderTransform">
+                                                            <Setter.Value>
+                                                                <ScaleTransform ScaleX="1.18" ScaleY="1.18"/>
+                                                            </Setter.Value>
+                                                        </Setter>
                                                     </Trigger>
                                                     <Trigger Property="IsDragging" Value="True">
-                                                        <Setter TargetName="ThumbScale" Property="ScaleX" Value="1.25"/>
-                                                        <Setter TargetName="ThumbScale" Property="ScaleY" Value="1.25"/>
+                                                        <Setter TargetName="ThumbCircle" Property="RenderTransform">
+                                                            <Setter.Value>
+                                                                <ScaleTransform ScaleX="1.25" ScaleY="1.25"/>
+                                                            </Setter.Value>
+                                                        </Setter>
                                                         <Setter TargetName="ThumbCircle" Property="Background" Value="#60A5FA"/>
                                                     </Trigger>
                                                 </ControlTemplate.Triggers>
@@ -545,7 +552,7 @@
                                     Margin="10,1,0,0"
                                     VerticalAlignment="Center">
                                 <TextBlock x:Name="CurrentVersionBadge"
-                                           Text="v1.3.0"
+                                           Text="v1.4.0"
                                            Foreground="{DynamicResource SecondaryTextBrush}"
                                            FontSize="11"
                                            FontWeight="SemiBold"/>
