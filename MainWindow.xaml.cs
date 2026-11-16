@@ -32,7 +32,6 @@ namespace Tagsor
         private const int WM_INPUT = 0x00FF;
         private const int WM_HOTKEY = 0x0312;
 
-        // Global Hotkey IDs
         private const int HOTKEY_PRIVACY_ID = 9001;
         private const int HOTKEY_SPOTLIGHT_ID = 9002;
         private const int HOTKEY_STATUS_1_ID = 9003;
@@ -75,7 +74,7 @@ namespace Tagsor
         private double _currentOverlayX;
         private double _currentOverlayY;
         private bool _hasInitializedPosition = false;
-        private const double SmoothFactor = 0.38;
+        private const double SmoothFactor = 0.34;
 
         private bool _isOverlayPaused = false;
         private bool _isPrivacyMode = false;
@@ -83,14 +82,12 @@ namespace Tagsor
         private Forms.NotifyIcon _trayIcon = null!;
         private TrayMenuPopup? _activeTrayMenu;
 
-        // Keystrokes & Repeat Counter State
         private readonly List<KeyDisplayItem> _typedKeys = new();
         private DateTime _lastKeyTime = DateTime.MinValue;
         private bool _isShowingKeys = false;
         private bool _hasPendingStandaloneShift = false;
         private DateTime _pendingShiftTime = DateTime.MinValue;
 
-        // Drag-Hold & Double-Click State
         private string? _heldMouseButton = null;
         private readonly HashSet<string> _pressedButtons = new();
         private const int VK_LBUTTON = 0x01;
@@ -100,12 +97,10 @@ namespace Tagsor
         private bool _holdBadgeShown = false;
         private DateTime _lastLeftClickTime = DateTime.MinValue;
 
-        // Spotlight Dimmer Overlay State
         private Window? _spotlightWindow;
         private RadialGradientBrush? _spotlightBrush;
         private bool _isSpotlightActive = false;
 
-        // Live Screen Marker, Smooth Splines & Hold-to-Snap Shape State
         private Window? _markerWindow;
         private Canvas? _markerCanvas;
         private System.Windows.Shapes.Path? _currentStrokePath;
@@ -118,11 +113,9 @@ namespace Tagsor
         private string _markerColorHex = "#60A5FA";
         private bool _markerAutoFade = true;
 
-        // Quick-Switch Status Chip State
         private string? _activeStatusText = null;
         private DateTime _statusExpiryTime = DateTime.MinValue;
 
-        // Shake-to-Locate Velocity Tracking
         private int _lastMoveDirection = 0;
         private int _directionFlipCount = 0;
         private DateTime _shakeWindowStart = DateTime.MinValue;
@@ -192,8 +185,13 @@ namespace Tagsor
             _overlay.SetAccentColor(_activeProfile.AccentHex);
             _overlay.SourceInitialized += OnOverlaySourceInitialized;
             _overlay.Show();
-            _overlay.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity);
+            _overlay.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity, animate: false);
             SyncWithWindowsTheme();
+
+            UpdateService.CleanupLeftoverTempFiles();
+            _availableUpdate = null;
+            _activeStatusText = null;
+            _trayIcon.Text = "Tagsor";
 
             _ = CheckForUpdatesAndNotifyPillAsync();
 
@@ -236,14 +234,18 @@ namespace Tagsor
             await Task.Delay(1800);
 
             var info = await UpdateService.CheckForUpdatesAsync();
-            if (info == null || !info.IsNewerAvailable) return;
+            if (info == null || !info.IsNewerAvailable)
+            {
+                _availableUpdate = null;
+                _trayIcon.Text = _isOverlayPaused ? "Tagsor (Paused)" : "Tagsor";
+                return;
+            }
 
             _availableUpdate = info;
             _trayIcon.Text = $"Tagsor (Update {info.VersionTag} available)";
 
             if (_isOverlayPaused || _isShowingKeys) return;
 
-            // Temporarily switch the cursor pill name to "Update available" for 6 seconds, then revert back
             string label = string.IsNullOrWhiteSpace(info.VersionTag)
                 ? "✨ Update available"
                 : $"✨ Update {info.VersionTag} available";
@@ -272,7 +274,7 @@ namespace Tagsor
                     Dispatcher.BeginInvoke(() =>
                     {
                         _settings = AppSettings.LoadOrCreate(_settingsFilePath);
-                        _overlay?.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity);
+                        _overlay?.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity, animate: true);
                         if (_overlay != null)
                         {
                             var hwnd = new WindowInteropHelper(_overlay).Handle;
@@ -364,16 +366,21 @@ namespace Tagsor
 
             win.OnLiveAppearancePreview += (scale, radius, opacity, offsetMode) =>
             {
+                _lastActivityTime = DateTime.UtcNow;
                 _settings.PillScale = scale;
                 _settings.PillCornerRadius = radius;
                 _settings.PillOpacity = opacity;
                 _settings.PositionOffsetMode = offsetMode;
-                _overlay.ApplyAppearance(scale, radius, opacity);
+                _overlay.SetIdleState(false);
+                _overlay.ApplyAppearance(scale, radius, opacity, animate: true);
             };
 
             win.OnInstallUpdateAndRestart += () =>
             {
-                Close();
+                _availableUpdate = null;
+                _activeStatusText = null;
+                _trayIcon.Text = "Tagsor";
+                Application.Current.Shutdown();
             };
 
             var previousAppearance = (_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity, _settings.PositionOffsetMode);
@@ -382,7 +389,7 @@ namespace Tagsor
             {
                 _settings = win.UpdatedSettings;
                 _settings.Save(_settingsFilePath);
-                _overlay.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity);
+                _overlay.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity, animate: true);
 
                 _savedMice = win.WorkingMice;
                 SaveMiceToDisk();
@@ -421,7 +428,7 @@ namespace Tagsor
             else
             {
                 (_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity, _settings.PositionOffsetMode) = previousAppearance;
-                _overlay.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity);
+                _overlay.ApplyAppearance(_settings.PillScale, _settings.PillCornerRadius, _settings.PillOpacity, animate: true);
             }
         }
 
@@ -635,7 +642,6 @@ namespace Tagsor
             }
         }
 
-        // Spotlight Dimmer Toggle
         private void ToggleSpotlight()
         {
             _isSpotlightActive = !_isSpotlightActive;
@@ -690,7 +696,6 @@ namespace Tagsor
             }
         }
 
-        // Live Screen Marker + Smooth Catmull-Rom Splines + Hold-to-Snap Shape Recognition
         private void ToggleMarkerMode()
         {
             _isMarkerActive = !_isMarkerActive;
@@ -1448,7 +1453,6 @@ namespace Tagsor
             return template;
         }
 
-        // Quick-Switch Status Chip
         private void TriggerStatusChip(string statusLabel, string hexColor)
         {
             if (_activeStatusText == statusLabel)
